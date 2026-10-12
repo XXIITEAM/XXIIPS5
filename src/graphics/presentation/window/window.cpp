@@ -778,6 +778,42 @@ void WindowContext::Run() {
 			title_time   = now;
 			title_frames = frames;
 		}
+#if defined(_WIN32)
+        // Automated input through the existing HLE Pad state, only when the
+        // launcher explicitly opts into a compatibility probe.
+        if (std::getenv("XXII_COMPAT_PROBE") != nullptr) {
+            static int probeStage = 0;
+            static const uint64_t probeStart = SDL_GetTicks();
+            const uint64_t elapsed = SDL_GetTicks() - probeStart;
+            constexpr int pad = Controller::HOST_INPUT_CONTROLLER_ID;
+            if (probeStage == 0 && elapsed >= 3000) {
+                Controller::SetButton(pad, Controller::PAD_BUTTON_CROSS, true);
+                std::fprintf(stderr, "XXII_INPUT_INJECT stage=1 button=CROSS down=1\n");
+                ++probeStage;
+            } else if (probeStage == 1 && elapsed >= 3500) {
+                Controller::SetButton(pad, Controller::PAD_BUTTON_CROSS, false);
+                std::fprintf(stderr, "XXII_INPUT_INJECT stage=2 button=CROSS down=0\n");
+                ++probeStage;
+            } else if (probeStage == 2 && elapsed >= 5500) {
+                Controller::SetAxis(pad, Controller::Axis::LeftX, 24000);
+                std::fprintf(stderr, "XXII_INPUT_INJECT stage=3 axis=LEFTX value=24000\n");
+                ++probeStage;
+            } else if (probeStage == 3 && elapsed >= 6500) {
+                Controller::SetAxis(pad, Controller::Axis::LeftX, 0);
+                std::fprintf(stderr, "XXII_INPUT_INJECT stage=4 axis=LEFTX value=0\n");
+                ++probeStage;
+            } else if (probeStage == 4 && elapsed >= 8500) {
+                Controller::SetButton(pad, Controller::PAD_BUTTON_CROSS, true);
+                std::fprintf(stderr, "XXII_INPUT_INJECT stage=5 button=CROSS down=1\n");
+                ++probeStage;
+            } else if (probeStage == 5 && elapsed >= 9000) {
+                Controller::SetButton(pad, Controller::PAD_BUTTON_CROSS, false);
+                std::fprintf(stderr, "XXII_INPUT_INJECT stage=6 button=CROSS down=0\n");
+                ++probeStage;
+            }
+            if (probeStage > 0) std::fflush(stderr);
+        }
+#endif
 		const auto wait_ms = static_cast<int>(title_interval_ms - (now - title_time));
 		if (!HostInputWaitEvent(&loop.event, wait_ms)) {
 			continue;
