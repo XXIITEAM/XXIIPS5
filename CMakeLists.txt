@@ -655,6 +655,13 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --scheduler-only)
 	add_test(NAME stream_buffer_ring
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --stream-buffer-only)
+	# Each of these starts a full guest runtime and can commit ~13.5 GiB of
+	# direct-memory backing on Windows. Do not schedule them concurrently with
+	# other tests on a shared self-hosted Windows runner.
+	set_tests_properties(kernel_file_system guest_red_zone_patcher
+		command_scheduler_timeline stream_buffer_ring
+		PROPERTIES RUN_SERIAL TRUE)
+
 	add_test(NAME gpu_command_lane
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-command-lane-only)
 	add_test(NAME pm4_context_state
