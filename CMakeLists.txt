@@ -367,8 +367,19 @@ list(APPEND check_headers
 	${KYTY_SOURCE_DIR}
 )
 
+# Compile the shared emulator runtime only once for normal executables and tests.
+# The virtual-memory test retains its own build because it injects
+# KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS into runtime sources.
+add_library(kyty_emulator_objects OBJECT ${kyty_emulator_src})
+target_include_directories(kyty_emulator_objects PRIVATE ${inc_headers})
+target_link_libraries(kyty_emulator_objects PRIVATE ${kyty_emulator_link_libraries})
+
 function(add_kyty_full_emulator_test target source)
-	add_executable(${target} EXCLUDE_FROM_ALL ${source} ${kyty_emulator_src})
+	if (target STREQUAL "virtual_memory_allocation_tests")
+		add_executable(${target} EXCLUDE_FROM_ALL ${source} ${kyty_emulator_src})
+	else()
+		add_executable(${target} EXCLUDE_FROM_ALL ${source} $<TARGET_OBJECTS:kyty_emulator_objects>)
+	endif()
 	target_link_libraries(${target} ${kyty_emulator_link_libraries})
 	target_include_directories(${target} PRIVATE ${inc_headers})
 	if (WIN32)
@@ -745,7 +756,7 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 	endif()
 endif()
 
-add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
+add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" $<TARGET_OBJECTS:kyty_emulator_objects>)
 configure_macos_guest_address_space(kyty_emulator)
 
 set(KYTY_TROPHY_UNLOCK_SOUND "${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/trophy-unlock.wav")
