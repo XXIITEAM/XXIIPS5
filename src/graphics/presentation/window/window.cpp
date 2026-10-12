@@ -328,6 +328,18 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 		}
 	}
 
+#if defined(_WIN32)
+    // Bounded real-device telemetry. Useful to distinguish "guest SDL never
+    // receives A" from "guest HLE ignores A" without logging every input.
+    if (f.down && std::getenv("XXII_EMBED_PARENT") != nullptr) {
+        static unsigned logged_buttons = 0;
+        if (logged_buttons < 8) {
+            ++logged_buttons;
+            std::fprintf(stderr, "XXII_GUEST_PAD_BUTTON_RECEIVED button=%d\n", f.button);
+            std::fflush(stderr);
+        }
+    }
+#endif
 	if (f.down || f.up) {
 		const auto button = ControllerButtonToPadButton(f.button);
 		if (button != 0) {
@@ -788,6 +800,21 @@ static void WindowCreate(WindowContext& context) {
 		SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11,wayland");
 	}
 #endif
+#if defined(_WIN32)
+    // SDL3 normally suppresses gamepad events while this app does not own
+    // keyboard focus. A Vulkan child HWND embedded in the Qt frontend can
+    // remain unfocused even though the guest game is visible. Without this
+    // hint PS/Xbox Guide still works in the Qt shell but A/X and sticks never
+    // reach the guest. Enable it *before* initializing SDL gamepads.
+    const char* embedded_parent = std::getenv("XXII_EMBED_PARENT");
+    const bool embedded_requested = embedded_parent != nullptr && embedded_parent[0] != '\0';
+    if (embedded_requested) {
+        SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1", SDL_HINT_OVERRIDE);
+        std::fprintf(stderr, "XXII_GUEST_PAD_BACKGROUND enabled=%d\n",
+                     SDL_GetHintBoolean(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, false) ? 1 : 0);
+        std::fflush(stderr);
+    }
+#endif
 	if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
 		EXIT("%s\n", SDL_GetError());
 	}
@@ -796,8 +823,6 @@ static void WindowCreate(WindowContext& context) {
 
 	uint32_t window_flags = WindowContext::InitialWindowFlags(Config::FullscreenEnabled());
 #if defined(_WIN32)
-    const char* embedded_parent = std::getenv("XXII_EMBED_PARENT");
-    const bool embedded_requested = embedded_parent != nullptr && embedded_parent[0] != '\0';
     if (embedded_requested) {
         window_flags |= static_cast<uint32_t>(SDL_WINDOW_HIDDEN | SDL_WINDOW_BORDERLESS);
         window_flags &= ~static_cast<uint32_t>(SDL_WINDOW_FULLSCREEN);
@@ -863,6 +888,11 @@ static void WindowCreate(WindowContext& context) {
             EXIT("XXII_EMBED_FAILED invalid parent or child HWND\n");
         }
         SDL_ShowWindow(context.window);
+        int gamepad_count = 0;
+        SDL_JoystickID* ids = SDL_GetGamepads(&gamepad_count);
+        SDL_free(ids);
+        std::fprintf(stderr, "XXII_GUEST_PAD_ENUMERATED count=%d\n", gamepad_count);
+        std::fflush(stderr);
     }
 #endif
     if (!embedded)
