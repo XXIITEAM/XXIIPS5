@@ -210,6 +210,19 @@ void TestTruncatedElfTables(const std::filesystem::path& root) {
   header.e_shoff = UINT64_MAX;
   header.e_shnum = 1;
   check_rejected("overflowing ELF section header offset is rejected");
+  header.e_shoff = 0;
+  header.e_shnum = 0;
+  {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    Check(static_cast<bool>(file.write(reinterpret_cast<const char*>(&header), sizeof(header))),
+          "write ELF without a dynamic segment");
+  }
+  Loader::Elf64 no_dynamic;
+  no_dynamic.Open(path);
+  Check(no_dynamic.IsValid() && no_dynamic.GetDynamic() == nullptr &&
+            no_dynamic.GetDynValue(Loader::DT_NEEDED) == nullptr &&
+            no_dynamic.GetDynList(Loader::DT_NEEDED).empty(),
+        "ELF without PT_DYNAMIC safely reports no dynamic imports");
 }
 
 void TestDuplicateSymbolResolution() {
