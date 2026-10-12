@@ -1082,11 +1082,9 @@ static int ConvertSocketOptionName(int level, int option) {
 	} else if (level == 6 && option == 1) {
 		return TCP_NODELAY;
 	}
-#if defined(_WIN32)
-	return option;
-#else
+	// Unknown guest options must not fall through to host Winsock numeric IDs:
+	// guest and Windows socket option namespaces are not ABI-compatible.
 	return -1;
-#endif
 }
 
 static int* P2pSocketOption(P2pEndpoint& endpoint, int option) {
