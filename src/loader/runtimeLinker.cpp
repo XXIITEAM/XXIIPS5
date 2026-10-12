@@ -1438,16 +1438,30 @@ uint64_t RuntimeLinker::ReadFromElf(Program* program, uint64_t vaddr) {
 	EXIT_IF(phdr == nullptr || ehdr == nullptr);
 
 	for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
-		if (phdr[i].p_memsz != 0 && (phdr[i].p_type == PT_LOAD || phdr[i].p_type == PT_OS_RELRO)) {
-			uint64_t segment_addr      = phdr[i].p_vaddr + program->base_vaddr;
-			uint64_t segment_file_size = phdr[i].p_filesz;
-
-			if (vaddr >= segment_addr && vaddr < segment_addr + segment_file_size) {
-				program->elf->LoadSegment(reinterpret_cast<uint64_t>(&ret),
-				                          phdr[i].p_offset + vaddr - segment_addr, sizeof(ret));
-				break;
-			}
+		const auto& segment = phdr[i];
+		if (segment.p_memsz == 0 || (segment.p_type != PT_LOAD &&
+		                             segment.p_type != PT_OS_RELRO) ||
+		    segment.p_vaddr > UINT64_MAX - program->base_vaddr) {
+			continue;
 		}
+		const uint64_t segment_addr = segment.p_vaddr + program->base_vaddr;
+		if (vaddr < segment_addr) {
+			continue;
+		}
+		const uint64_t offset = vaddr - segment_addr;
+		if (offset >= segment.p_filesz || offset >= segment.p_memsz ||
+		    segment.p_offset > UINT64_MAX - offset) {
+			continue;
+		}
+		// The file-backed portion ends at p_filesz, even when the file
+		// happens to contain adjacent bytes from another segment.
+		// ret is zero-initialized, so unread high bytes remain zero.
+		const uint64_t available = std::min(segment.p_filesz - offset,
+		                                    segment.p_memsz - offset);
+		const uint64_t read_size = std::min<uint64_t>(sizeof(ret), available);
+		program->elf->LoadSegment(reinterpret_cast<uint64_t>(&ret),
+		                          segment.p_offset + offset, read_size);
+		break;
 	}
 
 	return ret;

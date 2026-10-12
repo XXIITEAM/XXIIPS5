@@ -16,6 +16,7 @@
 #include "libs/network.h"
 #include "loader/symbolDatabase.h"
 #include "loader/elf.h"
+#include "loader/runtimeLinker.h"
 
 #include <algorithm>
 #include <array>
@@ -299,6 +300,51 @@ void TestTruncatedElfTables(const std::filesystem::path& root) {
   Loader::Elf64 truncated_dynamic;
   truncated_dynamic.Open(path);
   Check(!truncated_dynamic.IsValid(), "truncated PT_DYNAMIC extent is rejected");
+}
+
+void TestFileBackedSegmentBoundary(const std::filesystem::path& root) {
+  Loader::Elf64_Ehdr header {};
+  header.e_ident[Loader::EI_MAG0] = 0x7f;
+  header.e_ident[Loader::EI_MAG1] = 'E';
+  header.e_ident[Loader::EI_MAG2] = 'L';
+  header.e_ident[Loader::EI_MAG3] = 'F';
+  header.e_ident[Loader::EI_CLASS] = Loader::ELFCLASS64;
+  header.e_ident[Loader::EI_DATA] = Loader::ELFDATA2LSB;
+  header.e_ident[Loader::EI_VERSION] = Loader::EV_CURRENT;
+  header.e_ident[Loader::EI_OSABI] = Loader::ELFOSABI_FREEBSD;
+  header.e_type = Loader::ET_DYNEXEC;
+  header.e_machine = Loader::EM_X86_64;
+  header.e_version = Loader::EV_CURRENT;
+  header.e_ehsize = sizeof(header);
+  header.e_phentsize = sizeof(Loader::Elf64_Phdr);
+  header.e_phoff = sizeof(header);
+  header.e_phnum = 1;
+
+  Loader::Elf64_Phdr segment {};
+  segment.p_type = Loader::PT_LOAD;
+  segment.p_offset = sizeof(header) + sizeof(segment);
+  segment.p_filesz = 3;
+  segment.p_memsz = 64;
+  const std::array<uint8_t, 8> bytes {0x11, 0x22, 0x33, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5};
+  const auto path = root / "partial-segment.elf";
+  {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    file.write(reinterpret_cast<const char*>(&segment), sizeof(segment));
+    file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    Check(static_cast<bool>(file), "write partial file-backed ELF segment");
+  }
+
+  Loader::Program program;
+  program.elf = std::make_unique<Loader::Elf64>();
+  program.elf->Open(path);
+  Check(program.elf->IsValid(), "file-backed ELF fixture loads");
+  program.base_vaddr = 0x100000;
+  program.base_size = 0x1000;
+  Check(Loader::RuntimeLinker::ReadFromElf(&program, program.base_vaddr + 1) == 0x3322 &&
+            Loader::RuntimeLinker::ReadFromElf(&program, program.base_vaddr + 2) == 0x33 &&
+            Loader::RuntimeLinker::ReadFromElf(&program, program.base_vaddr + 3) == 0,
+        "ELF reads do not include bytes past p_filesz and zero-fill partial words");
 }
 
 void TestDuplicateSymbolResolution() {
@@ -1991,6 +2037,7 @@ int main(int argc, char** argv) {
   if (argc > 1 && std::strcmp(argv[1], "--loader-only") == 0) {
     TempDirectory temporary;
     TestTruncatedElfTables(temporary.Path());
+    TestFileBackedSegmentBoundary(temporary.Path());
     std::fprintf(stderr, "Loader fixture: ELF checks passed; testing NIDs\n");
     TestDuplicateSymbolResolution();
     subsystems.Destroy();
