@@ -174,6 +174,26 @@ void TestFileDescriptorFlags() {
   }
 }
 
+void TestDuplicateSymbolResolution() {
+  Loader::SymbolDatabase symbols;
+  const Loader::SymbolResolve id {"NIDexample", "libSceExample", 1,
+                                  "libSceModule", 1, 0, Loader::SymbolType::Func};
+  symbols.Add(id, 0x1000, "original");
+  const auto* first = symbols.Find(id);
+  Check(first != nullptr && first->vaddr == 0x1000,
+        "first NID registration resolves");
+  symbols.Add(id, 0x2000, "replacement");
+  const auto* updated = symbols.Find(id);
+  Check(updated == first && updated->vaddr == 0x2000 &&
+            updated->dbg_name == "replacement" &&
+            symbols.FindByNid("NIDexample", Loader::SymbolType::Func) == updated,
+        "duplicate NID registration replaces existing record in place");
+  symbols.Add(id, 0x3000);
+  Check(symbols.Find(id) == updated && updated->vaddr == 0x3000 &&
+            updated->dbg_name.empty(),
+        "overload without debug name clears stale metadata");
+}
+
 void TestSysmoduleReferences() {
   Loader::SymbolDatabase symbols;
   Libs::InitSysmodule_1(&symbols);
@@ -1852,6 +1872,7 @@ int main(int, char**) {
 
   TempDirectory temporary;
   FileSystem::Initialize();
+  TestDuplicateSymbolResolution();
   TestSysmoduleReferences();
   TestSystemServiceEntitlementEvents();
   TestRandomDevices();
