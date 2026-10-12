@@ -249,11 +249,16 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size) {
 		for (uint16_t i = 0; i < m_self->segments_num; i++) {
 			const auto& seg = m_self_segments[i];
 			if ((seg.type & 0x800u) != 0) {
-				auto phdr_id = ((seg.type >> 20u) & 0xFFFu);
+				const auto phdr_id = ((seg.type >> 20u) & 0xFFFu);
+				if (m_ehdr == nullptr || phdr_id >= m_ehdr->e_phnum) {
+					LOGF("SELF: segment %" PRIu16 " refers to missing program header %" PRIu32 "\n",
+					     i, phdr_id);
+					continue;
+				}
 
 				const auto& phdr = m_phdr[phdr_id];
 
-				if (file_offset >= phdr.p_offset && file_offset < phdr.p_offset + phdr.p_filesz) {
+				if (file_offset >= phdr.p_offset && file_offset - phdr.p_offset < phdr.p_filesz) {
 					EXIT_NOT_IMPLEMENTED(seg.decompressed_size != phdr.p_filesz);
 					EXIT_NOT_IMPLEMENTED(seg.compressed_size != seg.decompressed_size);
 
