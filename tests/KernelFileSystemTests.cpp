@@ -15,6 +15,7 @@
 #include "libs/errno.h"
 #include "libs/network.h"
 #include "loader/symbolDatabase.h"
+#include "loader/elf.h"
 
 #include <algorithm>
 #include <array>
@@ -26,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <limits>
 #include <memory>
@@ -172,6 +174,42 @@ void TestFileDescriptorFlags() {
           "O_CLOEXEC sets the descriptor flag on open");
     Check(FileSystem::KernelClose(cloexec_fd) == OK, "close flagged entropy source");
   }
+}
+
+void TestTruncatedElfTables(const std::filesystem::path& root) {
+  Loader::Elf64_Ehdr header {};
+  header.e_ident[Loader::EI_MAG0] = 0x7f;
+  header.e_ident[Loader::EI_MAG1] = 'E';
+  header.e_ident[Loader::EI_MAG2] = 'L';
+  header.e_ident[Loader::EI_MAG3] = 'F';
+  header.e_ident[Loader::EI_CLASS] = Loader::ELFCLASS64;
+  header.e_ident[Loader::EI_DATA] = Loader::ELFDATA2LSB;
+  header.e_ident[Loader::EI_VERSION] = Loader::EV_CURRENT;
+  header.e_ident[Loader::EI_OSABI] = Loader::ELFOSABI_FREEBSD;
+  header.e_type = Loader::ET_DYNEXEC;
+  header.e_machine = Loader::EM_X86_64;
+  header.e_version = Loader::EV_CURRENT;
+  header.e_ehsize = sizeof(header);
+  header.e_phentsize = sizeof(Loader::Elf64_Phdr);
+  header.e_shentsize = sizeof(Loader::Elf64_Shdr);
+  const auto path = root / "truncated-elf.bin";
+  const auto check_rejected = [&](const char* description) {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    Check(static_cast<bool>(file.write(reinterpret_cast<const char*>(&header), sizeof(header))),
+          "write malformed ELF fixture");
+    file.close();
+    Loader::Elf64 elf;
+    elf.Open(path);
+    Check(!elf.IsValid(), description);
+  };
+  header.e_phoff = sizeof(header);
+  header.e_phnum = 1;
+  check_rejected("truncated ELF program headers are rejected");
+  header.e_phnum = 0;
+  header.e_phoff = 0;
+  header.e_shoff = UINT64_MAX;
+  header.e_shnum = 1;
+  check_rejected("overflowing ELF section header offset is rejected");
 }
 
 void TestDuplicateSymbolResolution() {
@@ -1871,6 +1909,7 @@ int main(int, char**) {
   graphics->CreateVulkan();
 
   TempDirectory temporary;
+  TestTruncatedElfTables(temporary.Path());
   FileSystem::Initialize();
   TestDuplicateSymbolResolution();
   TestSysmoduleReferences();
