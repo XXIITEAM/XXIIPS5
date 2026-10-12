@@ -295,9 +295,15 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size) {
 }
 
 const Elf64_Dyn* Elf64::GetDynValue(Elf64_Sxword tag) const {
-	for (uint64_t i = 0; GetDynamic() != nullptr && i < m_dynamic_size / sizeof(Elf64_Dyn); ++i) {
-		const auto* dyn = GetDynamic() + i;
-		if (dyn->d_tag == DT_NULL) { break; }
+	const auto* table = GetDynamic();
+	if (table == nullptr) {
+		return nullptr;
+	}
+	for (uint64_t i = 0; i < m_dynamic_size / sizeof(Elf64_Dyn); ++i) {
+		const auto* dyn = table + i;
+		if (dyn->d_tag == DT_NULL) {
+			break;
+		}
 		if (dyn->d_tag == tag) {
 			return dyn;
 		}
@@ -307,7 +313,15 @@ const Elf64_Dyn* Elf64::GetDynValue(Elf64_Sxword tag) const {
 
 std::vector<const Elf64_Dyn*> Elf64::GetDynList(Elf64_Sxword tag) const {
 	std::vector<const Elf64_Dyn*> ret;
-	for (const auto* dyn = GetDynamic(); dyn->d_tag != DT_NULL; dyn++) {
+	const auto* table = GetDynamic();
+	if (table == nullptr) {
+		return ret;
+	}
+	for (uint64_t i = 0; i < m_dynamic_size / sizeof(Elf64_Dyn); ++i) {
+		const auto* dyn = table + i;
+		if (dyn->d_tag == DT_NULL) {
+			break;
+		}
 		if (dyn->d_tag == tag) {
 			ret.push_back(dyn);
 		}
@@ -432,8 +446,14 @@ void Elf64::DbgDump(const std::string& folder) {
 	fout.Close();
 
 	fout.Create(folder_str + "dynamic.txt");
-	for (const auto* dyn = GetDynamic(); dyn->d_tag != DT_NULL; dyn++) {
-		DbgPrintDynamic64(dyn, fout);
+	if (const auto* table = GetDynamic(); table != nullptr) {
+		for (uint64_t i = 0; i < m_dynamic_size / sizeof(Elf64_Dyn); ++i) {
+			const auto* dyn = table + i;
+			if (dyn->d_tag == DT_NULL) {
+				break;
+			}
+			DbgPrintDynamic64(dyn, fout);
+		}
 	}
 	fout.Close();
 }

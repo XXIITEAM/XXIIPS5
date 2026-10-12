@@ -220,13 +220,44 @@ void TestTruncatedElfTables(const std::filesystem::path& root) {
     Check(static_cast<bool>(file.write(reinterpret_cast<const char*>(&header), sizeof(header))),
           "write ELF without a dynamic segment");
   }
-  Loader::Elf64 no_dynamic;
-  no_dynamic.Open(path);
-  std::fprintf(stderr, "Loader fixture: Open(no dynamic) returned\n");
-  Check(no_dynamic.IsValid() && no_dynamic.GetDynamic() == nullptr &&
-            no_dynamic.GetDynValue(Loader::DT_NEEDED) == nullptr &&
-            no_dynamic.GetDynList(Loader::DT_NEEDED).empty(),
-        "ELF without PT_DYNAMIC safely reports no dynamic imports");
+  {
+    Loader::Elf64 no_dynamic;
+    no_dynamic.Open(path);
+    Check(no_dynamic.IsValid() && no_dynamic.GetDynamic() == nullptr &&
+              no_dynamic.GetDynValue(Loader::DT_NEEDED) == nullptr &&
+              no_dynamic.GetDynList(Loader::DT_NEEDED).empty(),
+          "ELF without PT_DYNAMIC safely reports no dynamic imports");
+  }
+
+  // A truncated dynamic table can omit DT_NULL. Lookups must stop at its
+  // declared PT_DYNAMIC size, rather than accessing memory past its end.
+  std::fprintf(stderr, "Loader fixture: dynamic table without DT_NULL\n");
+  header.e_phoff = sizeof(header);
+  header.e_phnum = 1;
+  Loader::Elf64_Phdr dynamic_segment {};
+  dynamic_segment.p_type = Loader::PT_DYNAMIC;
+  dynamic_segment.p_offset = sizeof(header) + sizeof(dynamic_segment);
+  dynamic_segment.p_filesz = sizeof(Loader::Elf64_Dyn);
+  dynamic_segment.p_memsz = dynamic_segment.p_filesz;
+  Loader::Elf64_Dyn dynamic_tag {};
+  dynamic_tag.d_tag = Loader::DT_NEEDED;
+  dynamic_tag.d_un.d_val = 42;
+  {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    file.write(reinterpret_cast<const char*>(&dynamic_segment), sizeof(dynamic_segment));
+    file.write(reinterpret_cast<const char*>(&dynamic_tag), sizeof(dynamic_tag));
+    Check(static_cast<bool>(file), "write non-terminated dynamic ELF fixture");
+  }
+  Loader::Elf64 nonterminated;
+  nonterminated.Open(path);
+  const auto* found = nonterminated.GetDynValue(Loader::DT_NEEDED);
+  const auto needed = nonterminated.GetDynList(Loader::DT_NEEDED);
+  Check(nonterminated.IsValid() && found != nullptr && found->d_un.d_val == 42 &&
+            needed.size() == 1 && needed.front() == found &&
+            nonterminated.GetDynValue(Loader::DT_SONAME) == nullptr &&
+            nonterminated.GetDynList(Loader::DT_SONAME).empty(),
+        "non-terminated dynamic ELF iteration stays inside PT_DYNAMIC");
 }
 
 void TestDuplicateSymbolResolution() {
