@@ -295,7 +295,9 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size) {
 }
 
 const Elf64_Dyn* Elf64::GetDynValue(Elf64_Sxword tag) const {
-	for (const auto* dyn = GetDynamic(); dyn->d_tag != DT_NULL; dyn++) {
+	for (uint64_t i = 0; GetDynamic() != nullptr && i < m_dynamic_size / sizeof(Elf64_Dyn); ++i) {
+		const auto* dyn = GetDynamic() + i;
+		if (dyn->d_tag == DT_NULL) { break; }
 		if (dyn->d_tag == tag) {
 			return dyn;
 		}
@@ -354,6 +356,7 @@ void Elf64::Clear() {
 	m_str_table.reset();
 	m_str_table_size = 0;
 	m_dynamic.reset();
+	m_dynamic_size = 0;
 	m_dynamic_data.reset();
 }
 
@@ -605,6 +608,7 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 			switch (m_phdr[i].p_type) {
 				case PT_DYNAMIC:
 					m_dynamic = LoadDynamic64(this, m_phdr[i].p_offset, m_phdr[i].p_filesz);
+					m_dynamic_size = m_phdr[i].p_filesz;
 					break;
 				case PT_OS_DYNLIBDATA:
 					m_dynamic_data = LoadDynamic64(this, m_phdr[i].p_offset, m_phdr[i].p_filesz);
