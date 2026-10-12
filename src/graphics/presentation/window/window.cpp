@@ -24,6 +24,8 @@
 #include "libs/controller.h"
 #include "loader/systemContent.h"
 
+#include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <fmt/format.h>
 #include <memory>
@@ -970,6 +972,19 @@ void WindowContext::UpdateTitle(uint64_t frame_num, double current_fps) {
 	    device_name, processor_name, frame_num, current_fps);
 
 	SDL_SetWindowTitle(window, text.c_str());
+
+	// Opt-in CI/performance diagnostics: count only successfully presented
+	// swapchain frames. This is presentation FPS, not proof of playable gameplay.
+	// Disabled by default to avoid changing normal game performance or logging.
+	static const bool trace_present_fps = [] {
+		const char* enabled = std::getenv("XXII_FPS_TRACE");
+		return enabled != nullptr && enabled[0] == '1' && enabled[1] == '\0';
+	}();
+	if (trace_present_fps) {
+		std::fprintf(stderr, "XXII_PRESENT_FPS frames=%" PRIu64 " fps=%.2f\n",
+		             frame_num, current_fps);
+		std::fflush(stderr);
+	}
 }
 
 } // namespace Libs::Graphics
