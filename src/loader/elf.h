@@ -7,6 +7,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
 namespace Common {
@@ -284,8 +285,19 @@ public:
 
 	template <class T>
 	[[nodiscard]] T GetDynamicData(uint64_t offset) const {
-		return (m_dynamic_data == nullptr ? nullptr
-		                                  : reinterpret_cast<T>(m_dynamic_data.get() + offset));
+		static_assert(std::is_pointer_v<T>);
+		using Element = std::remove_cv_t<std::remove_pointer_t<T>>;
+		uint64_t required_size = 1;
+		if constexpr (!std::is_void_v<Element>) {
+			required_size = sizeof(Element);
+		}
+		// Check subtraction only after checking the starting offset to
+		// prevent integer wraparound on malformed DT_OS_* pointers.
+		if (m_dynamic_data == nullptr || offset > m_dynamic_data_size ||
+		    required_size > m_dynamic_data_size - offset) {
+			return nullptr;
+		}
+		return reinterpret_cast<T>(m_dynamic_data.get() + offset);
 	}
 
 private:
@@ -300,6 +312,7 @@ private:
 	std::unique_ptr<uint8_t[]>     m_dynamic;
 	uint64_t                       m_dynamic_size = 0;
 	std::unique_ptr<uint8_t[]>     m_dynamic_data;
+	uint64_t                       m_dynamic_data_size = 0;
 	std::unique_ptr<char[]>        m_str_table;
 	uint32_t                       m_str_table_size = 0;
 	// uint64_t    m_base_vaddr   = 0;

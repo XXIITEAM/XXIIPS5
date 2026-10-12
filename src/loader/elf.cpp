@@ -372,6 +372,7 @@ void Elf64::Clear() {
 	m_dynamic.reset();
 	m_dynamic_size = 0;
 	m_dynamic_data.reset();
+	m_dynamic_data_size = 0;
 }
 
 void Elf64::DbgDump(const std::string& folder) {
@@ -625,15 +626,27 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 		}
 
 		for (Elf64_Half i = 0; i < m_ehdr->e_phnum; i++) {
-			switch (m_phdr[i].p_type) {
-				case PT_DYNAMIC:
-					m_dynamic = LoadDynamic64(this, m_phdr[i].p_offset, m_phdr[i].p_filesz);
-					m_dynamic_size = m_phdr[i].p_filesz;
-					break;
-				case PT_OS_DYNLIBDATA:
-					m_dynamic_data = LoadDynamic64(this, m_phdr[i].p_offset, m_phdr[i].p_filesz);
-					break;
-				default: break;
+			const auto& segment = m_phdr[i];
+			if (segment.p_type != PT_DYNAMIC && segment.p_type != PT_OS_DYNLIBDATA) {
+				continue;
+			}
+			if (segment.p_filesz == 0) {
+				continue;
+			}
+			if (segment.p_filesz > UINT32_MAX ||
+			    (m_self == nullptr &&
+			     !IsFileRangeValid(file_size, segment.p_offset, segment.p_filesz, 1))) {
+				LOGF("ELF: dynamic segment %" PRIu16 " extends beyond the file or exceeds supported size\n",
+				     i);
+				Clear();
+				return;
+			}
+			if (segment.p_type == PT_DYNAMIC) {
+				m_dynamic = LoadDynamic64(this, segment.p_offset, segment.p_filesz);
+				m_dynamic_size = segment.p_filesz;
+			} else {
+				m_dynamic_data = LoadDynamic64(this, segment.p_offset, segment.p_filesz);
+				m_dynamic_data_size = segment.p_filesz;
 			}
 		}
 	}

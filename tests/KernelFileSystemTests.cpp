@@ -249,15 +249,56 @@ void TestTruncatedElfTables(const std::filesystem::path& root) {
     file.write(reinterpret_cast<const char*>(&dynamic_tag), sizeof(dynamic_tag));
     Check(static_cast<bool>(file), "write non-terminated dynamic ELF fixture");
   }
-  Loader::Elf64 nonterminated;
-  nonterminated.Open(path);
-  const auto* found = nonterminated.GetDynValue(Loader::DT_NEEDED);
-  const auto needed = nonterminated.GetDynList(Loader::DT_NEEDED);
-  Check(nonterminated.IsValid() && found != nullptr && found->d_un.d_val == 42 &&
-            needed.size() == 1 && needed.front() == found &&
-            nonterminated.GetDynValue(Loader::DT_SONAME) == nullptr &&
-            nonterminated.GetDynList(Loader::DT_SONAME).empty(),
-        "non-terminated dynamic ELF iteration stays inside PT_DYNAMIC");
+  {
+    Loader::Elf64 nonterminated;
+    nonterminated.Open(path);
+    const auto* found = nonterminated.GetDynValue(Loader::DT_NEEDED);
+    const auto needed = nonterminated.GetDynList(Loader::DT_NEEDED);
+    Check(nonterminated.IsValid() && found != nullptr && found->d_un.d_val == 42 &&
+              needed.size() == 1 && needed.front() == found &&
+              nonterminated.GetDynValue(Loader::DT_SONAME) == nullptr &&
+              nonterminated.GetDynList(Loader::DT_SONAME).empty(),
+          "non-terminated dynamic ELF iteration stays inside PT_DYNAMIC");
+  }
+
+  // The PS5-specific dynamic data segment holds import, string and relocation
+  // metadata. Reject pointers beyond its end, including overflowing offsets.
+  std::fprintf(stderr, "Loader fixture: dynamic metadata pointer bounds\n");
+  dynamic_segment.p_type = Loader::PT_OS_DYNLIBDATA;
+  {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    file.write(reinterpret_cast<const char*>(&dynamic_segment), sizeof(dynamic_segment));
+    file.write(reinterpret_cast<const char*>(&dynamic_tag), sizeof(dynamic_tag));
+    Check(static_cast<bool>(file), "write OS dynamic metadata fixture");
+  }
+  {
+    Loader::Elf64 metadata;
+    metadata.Open(path);
+    Check(metadata.IsValid() &&
+              metadata.GetDynamicData<char*>(0) != nullptr &&
+              metadata.GetDynamicData<char*>(sizeof(dynamic_tag) - 1) != nullptr &&
+              metadata.GetDynamicData<char*>(sizeof(dynamic_tag)) == nullptr &&
+              metadata.GetDynamicData<char*>(UINT64_MAX) == nullptr &&
+              metadata.GetDynamicData<Loader::Elf64_Rela*>(0) == nullptr,
+          "dynamic metadata access respects extent and typed entry size");
+  }
+
+  // The loader must reject an ELF with a segment file extent that exceeds EOF,
+  // rather than allocating and parsing partially initialized dynamic metadata.
+  std::fprintf(stderr, "Loader fixture: truncated dynamic segment\n");
+  dynamic_segment.p_type = Loader::PT_DYNAMIC;
+  dynamic_segment.p_filesz = sizeof(dynamic_tag) * 2;
+  {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    file.write(reinterpret_cast<const char*>(&dynamic_segment), sizeof(dynamic_segment));
+    file.write(reinterpret_cast<const char*>(&dynamic_tag), sizeof(dynamic_tag));
+    Check(static_cast<bool>(file), "write truncated dynamic segment fixture");
+  }
+  Loader::Elf64 truncated_dynamic;
+  truncated_dynamic.Open(path);
+  Check(!truncated_dynamic.IsValid(), "truncated PT_DYNAMIC extent is rejected");
 }
 
 void TestDuplicateSymbolResolution() {
