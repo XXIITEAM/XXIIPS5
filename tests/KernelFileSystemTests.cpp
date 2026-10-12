@@ -1903,7 +1903,7 @@ void CheckSocketWakeup() {
 
 } // namespace
 
-int main(int, char**) {
+int main(int argc, char** argv) {
   Common::InitializeThreads();
   Common::Subsystems subsystems;
   subsystems.Initialize<Config::Lifecycle>();
@@ -1911,6 +1911,16 @@ int main(int, char**) {
   options.printf_direction = Config::LogDirection::Silent;
   Config::Load(options);
   subsystems.Initialize<Log::Lifecycle>();
+
+  if (argc > 1 && std::strcmp(argv[1], "--loader-only") == 0) {
+    TempDirectory temporary;
+    TestTruncatedElfTables(temporary.Path());
+    TestDuplicateSymbolResolution();
+    subsystems.Destroy();
+    std::printf("Loader ELF/NID tests: all cases passed\\n");
+    return 0;
+  }
+
 
   Check(SDL_InitSubSystem(SDL_INIT_VIDEO), "initialize Vulkan test video");
   auto graphics = std::make_unique<Libs::Graphics::WindowContext>();
@@ -1922,9 +1932,7 @@ int main(int, char**) {
   graphics->CreateVulkan();
 
   TempDirectory temporary;
-  TestTruncatedElfTables(temporary.Path());
   FileSystem::Initialize();
-  TestDuplicateSymbolResolution();
   TestSysmoduleReferences();
   TestSystemServiceEntitlementEvents();
   TestRandomDevices();
