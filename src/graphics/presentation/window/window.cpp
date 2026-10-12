@@ -34,6 +34,10 @@
 #include <vulkan/vk_platform.h>
 #include <filesystem>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_SIMD
 #include "stb_image.h"
@@ -791,6 +795,14 @@ static void WindowCreate(WindowContext& context) {
 	LOGF("WindowCreate(): width = %d, height = %d\n", width, height);
 
 	uint32_t window_flags = WindowContext::InitialWindowFlags(Config::FullscreenEnabled());
+#if defined(_WIN32)
+    const char* embedded_parent = std::getenv("XXII_EMBED_PARENT");
+    const bool embedded_requested = embedded_parent != nullptr && embedded_parent[0] != '\0';
+    if (embedded_requested) {
+        window_flags |= static_cast<uint32_t>(SDL_WINDOW_HIDDEN | SDL_WINDOW_BORDERLESS);
+        window_flags &= ~static_cast<uint32_t>(SDL_WINDOW_FULLSCREEN);
+    }
+#endif
 #if defined(__APPLE__)
 	// SDL loads Vulkan while creating a Vulkan window, so select the bundled
 	// MoltenVK loader before calling SDL_CreateWindow. Keep an explicit user
@@ -822,8 +834,41 @@ static void WindowCreate(WindowContext& context) {
 		EXIT("%s\n", SDL_GetError());
 	}
 
-	SDL_SetWindowPosition(context.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
-	HostInputInit(context.window);
+    bool embedded = false;
+#if defined(_WIN32)
+    if (embedded_requested) {
+        const uintptr_t parent_value = static_cast<uintptr_t>(std::strtoull(embedded_parent, nullptr, 16));
+        const HWND parent = reinterpret_cast<HWND>(parent_value);
+        const HWND child = static_cast<HWND>(SDL_GetPointerProperty(
+            SDL_GetWindowProperties(context.window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+        if (IsWindow(parent) && IsWindow(child) && parent != child) {
+            const LONG_PTR current = GetWindowLongPtr(child, GWL_STYLE);
+            const LONG_PTR style = (current & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_BORDER |
+                                               WS_DLGFRAME | WS_SYSMENU)) |
+                                   WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+            SetWindowLongPtr(child, GWL_STYLE, style);
+            SetParent(child, parent);
+            if (GetParent(child) == parent) {
+                RECT rect {};
+                GetClientRect(parent, &rect);
+                SetWindowPos(child, nullptr, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                embedded = true;
+                std::fprintf(stderr, "XXII_EMBED_READY hwnd=%" PRIxPTR "\n",
+                             reinterpret_cast<uintptr_t>(child));
+                std::fflush(stderr);
+            }
+        }
+        if (!embedded) {
+            std::fprintf(stderr, "XXII_EMBED_FAILED invalid parent or child HWND\n");
+            std::fflush(stderr);
+        }
+        SDL_ShowWindow(context.window);
+    }
+#endif
+    if (!embedded)
+        SDL_SetWindowPosition(context.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    HostInputInit(context.window);
 	InitializeSystemOverlayInput(context.window);
 	context.UpdateIcon();
 }
