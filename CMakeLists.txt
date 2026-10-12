@@ -850,6 +850,15 @@ install(TARGETS kyty_emulator DESTINATION .)
 if(KYTY_BUILD_LAUNCHER)
 	add_subdirectory("${KYTY_SOURCE_DIR}/launcher" "${CMAKE_CURRENT_BINARY_DIR}/launcher")
 
+	# PSVXXII is independent of the legacy Qt Widgets launcher and the guest runtime.
+	# Quick support is required when this option is enabled: CI must validate the
+	# real application rather than silently skipping its build.
+	option(XXII_BUILD_PSVXXII "Build new Qt Quick controller-first frontend" ON)
+	if(XXII_BUILD_PSVXXII)
+		find_package(Qt6 COMPONENTS Quick Qml QuickControls2 REQUIRED)
+		add_subdirectory("${KYTY_SOURCE_DIR}/psvxxii" "${CMAKE_CURRENT_BINARY_DIR}/psvxxii")
+	endif()
+
 	if(LINUX)
 		target_link_options(launcher PRIVATE $<$<CONFIG:Release>:-Wl,--strip-all>)
 	endif()
