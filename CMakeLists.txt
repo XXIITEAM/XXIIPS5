@@ -853,7 +853,15 @@ if(KYTY_BUILD_LAUNCHER)
 	# PSVXXII is independent of the legacy Qt Widgets launcher and the guest runtime.
 	# Quick support is required when this option is enabled: CI must validate the
 	# real application rather than silently skipping its build.
-	option(XXII_BUILD_PSVXXII "Build new Qt Quick controller-first frontend" ON)
+	# Ship and test PSVXXII on Windows first. Preserve the historical
+	# Linux/macOS build requirements until those UI toolchains are validated.
+	if(WIN32)
+		set(_psvxxii_default ON)
+	else()
+		set(_psvxxii_default OFF)
+	endif()
+	option(XXII_BUILD_PSVXXII "Build new Qt Quick controller-first frontend" ${_psvxxii_default})
+	unset(_psvxxii_default)
 	if(XXII_BUILD_PSVXXII)
 		find_package(Qt6 COMPONENTS Quick Qml QuickControls2 REQUIRED)
 		add_subdirectory("${KYTY_SOURCE_DIR}/psvxxii" "${CMAKE_CURRENT_BINARY_DIR}/psvxxii")
