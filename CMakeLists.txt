@@ -706,6 +706,23 @@ if(BUILD_TESTING)
 	add_test(NAME buffer_cache_ranges
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --buffer-cache-range-only)
 
+	# GPU integration tests share a physical Vulkan adapter. Running them in
+	# separate processes concurrently has caused timeline-semaphore failures
+	# on Windows self-hosted runners. Serialize GPU tests within each CTest run,
+	# while preserving parallel execution for CPU-only tests.
+	set_tests_properties(
+		shader_recompiler_compute shader_recompiler_alignbyte
+		graphics_pipeline_rasterization graphics_draw_offsets
+		command_scheduler_timeline stream_buffer_ring gpu_command_lane
+		pm4_context_state gpu_tiler image_transfer_layout
+		texture_cache_layered_image host_image_allocation
+		texture_cache_image_views texture_cache_storage_sampled
+		texture_cache_depth_readback compute_meta_clear_classification
+		buffer_cache_dirty_gc color_render_target_1d
+		texture_cache_image_overlap texture_cache_htile_clear
+		buffer_cache_ranges
+		PROPERTIES RESOURCE_LOCK xxii_vulkan_gpu)
+
 	add_custom_target(kyty_tests DEPENDS
 		ime_dialog_tests
 		shader_cfg_tests
