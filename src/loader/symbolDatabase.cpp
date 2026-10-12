@@ -22,20 +22,28 @@ std::string SymbolDatabase::GenerateName(const SymbolResolve& s) {
 }
 
 void SymbolDatabase::Add(const SymbolResolve& s, uint64_t vaddr) {
-	SymbolRecord r {};
-	r.name  = GenerateName(s);
-	r.vaddr = vaddr;
-	m_map.insert_or_assign(r.name, m_symbols.size());
-	m_symbols.push_back(r);
+	Add(s, vaddr, {});
 }
 
 void SymbolDatabase::Add(const SymbolResolve& s, uint64_t vaddr, const std::string& dbg_name) {
-	SymbolRecord r {};
-	r.name     = GenerateName(s);
-	r.vaddr    = vaddr;
-	r.dbg_name = dbg_name;
-	m_map.insert_or_assign(r.name, m_symbols.size());
-	m_symbols.push_back(r);
+	auto name = GenerateName(s);
+	const auto existing = m_map.find(name);
+	if (existing != m_map.end()) {
+		// Resolving the same NID again updates the original record rather than
+		// appending unreachable duplicates and invalidating cached pointers.
+		auto& record = m_symbols[existing->second];
+		record.vaddr = vaddr;
+		record.dbg_name = dbg_name;
+		return;
+	}
+
+	SymbolRecord record {};
+	record.name = std::move(name);
+	record.vaddr = vaddr;
+	record.dbg_name = dbg_name;
+	const auto index = m_symbols.size();
+	m_symbols.push_back(std::move(record));
+	m_map.emplace(m_symbols[index].name, index);
 }
 
 void SymbolDatabase::DbgDump(const std::string& folder, const std::string& file_name) {
