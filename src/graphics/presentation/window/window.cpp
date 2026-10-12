@@ -860,8 +860,7 @@ static void WindowCreate(WindowContext& context) {
             }
         }
         if (!embedded) {
-            std::fprintf(stderr, "XXII_EMBED_FAILED invalid parent or child HWND\n");
-            std::fflush(stderr);
+            EXIT("XXII_EMBED_FAILED invalid parent or child HWND\n");
         }
         SDL_ShowWindow(context.window);
     }
