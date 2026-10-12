@@ -9,6 +9,12 @@
 
 namespace Loader {
 
+// Check file-backed ELF tables without overflowing offset + count * entry_size.
+static bool IsFileRangeValid(uint64_t file_size, uint64_t offset, uint64_t count,
+                             uint64_t entry_size) {
+	return offset <= file_size && (entry_size == 0 || count <= (file_size - offset) / entry_size);
+}
+
 static std::unique_ptr<SelfHeader> LoadSelf(Common::File& f) {
 	if (f.Remaining() < sizeof(SelfHeader)) {
 		return nullptr;
@@ -562,15 +568,32 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 	}
 
 	if (m_ehdr != nullptr /*&& m_self == nullptr*/) {
+		const auto file_size = m_f->Size();
+		if (ehdr_pos > file_size ||
+		    !IsFileRangeValid(file_size - ehdr_pos, m_ehdr->e_phoff,
+		                      m_ehdr->e_phnum, sizeof(Elf64_Phdr)) ||
+		    (m_self == nullptr &&
+		     !IsFileRangeValid(file_size - ehdr_pos, m_ehdr->e_shoff,
+		                       m_ehdr->e_shnum, sizeof(Elf64_Shdr)))) {
+			LOGF("ELF: program or section header table is outside the file\n");
+			Clear();
+			return;
+		}
 		m_phdr = LoadPhdr64(*m_f, ehdr_pos + m_ehdr->e_phoff, m_ehdr->e_phnum);
 		if (m_self == nullptr) {
 			m_shdr = LoadShdr64(*m_f, ehdr_pos + m_ehdr->e_shoff, m_ehdr->e_shnum);
 
 			if (m_shdr != nullptr) {
 				if (m_ehdr->e_shstrndx < m_ehdr->e_shnum) {
-					m_str_table_size = static_cast<uint32_t>(m_shdr[m_ehdr->e_shstrndx].sh_size);
-					m_str_table =
-					    LoadStrTable(*m_f, m_shdr[m_ehdr->e_shstrndx].sh_offset, m_str_table_size);
+					const auto& section = m_shdr[m_ehdr->e_shstrndx];
+					if (section.sh_size > UINT32_MAX ||
+					    !IsFileRangeValid(file_size, section.sh_offset, section.sh_size, 1)) {
+						LOGF("ELF: section name string table is outside the file\n");
+						Clear();
+						return;
+					}
+					m_str_table_size = static_cast<uint32_t>(section.sh_size);
+					m_str_table = LoadStrTable(*m_f, section.sh_offset, m_str_table_size);
 				}
 			}
 		} else if (m_ehdr->e_shnum != 0) {
