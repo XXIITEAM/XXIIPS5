@@ -292,8 +292,35 @@ static void GameEventFinger([[maybe_unused]] const EventFinger& f) {
 #endif
 }
 
+#if defined(_WIN32)
+// Lazily opened by the guest. The actual kernel object belongs to PSVXXII;
+// ownership cannot be confused with an ordinary UI keyboard-focus change.
+static HANDLE GuestInputGate() {
+    static HANDLE gate = []() -> HANDLE {
+        const char* name = std::getenv("XXII_INPUT_GATE_EVENT");
+        if (!name || !*name) return nullptr;
+        const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, nullptr, 0);
+        if (count <= 0 || count > 256) return nullptr;
+        std::wstring wide(static_cast<size_t>(count), L'\0');
+        if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, wide.data(), count))
+            return nullptr;
+        HANDLE event = OpenEventW(SYNCHRONIZE, FALSE, wide.c_str());
+        if (!event) std::fprintf(stderr, "XXII_GUEST_INPUT_GATE_OPEN_FAILED code=%lu\n", GetLastError());
+        return event;
+    }();
+    return gate;
+}
+static bool GuestInputCaptured() {
+    HANDLE gate = GuestInputGate();
+    return gate && WaitForSingleObject(gate, 0) == WAIT_OBJECT_0;
+}
+#endif
+
 static void GameEventController([[maybe_unused]] const EventController& f) {
 	EXIT_NOT_IMPLEMENTED(f.remapped);
+#if defined(_WIN32)
+    if (GuestInputCaptured() && !f.added && !f.removed) return;
+#endif
 
 #ifdef KYTY_DBG_INPUT
 	if (f.added || f.removed) {
@@ -758,6 +785,35 @@ void WindowContext::Run() {
 	auto               title_frames      = loop.presented_frames.load(std::memory_order_relaxed);
 
 	while (!loop.need_exit) {
+#if defined(_WIN32)
+        // Drain held states once at the capture boundary, not each frame.
+        // This prevents walking/shooting from remaining latched behind a menu.
+        static bool wasCaptured = false;
+        const bool captured = GuestInputCaptured();
+        if (captured != wasCaptured) {
+            const int count = 0;
+            (void)count;
+            int padCount = 0;
+            SDL_JoystickID* pads = SDL_GetGamepads(&padCount);
+            if (pads) {
+                for (int i = 0; i < padCount; ++i) {
+                    const auto id = pads[i];
+                    for (int button = 0; button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
+                        const auto mapped = ControllerButtonToPadButton(button);
+                        if (mapped) Controller::SetButton(id, mapped, false);
+                    }
+                    Controller::SetAxis(id, Controller::Axis::LeftX, 0);
+                    Controller::SetAxis(id, Controller::Axis::LeftY, 0);
+                    Controller::SetAxis(id, Controller::Axis::RightX, 0);
+                    Controller::SetAxis(id, Controller::Axis::RightY, 0);
+                }
+                SDL_free(pads);
+            }
+            wasCaptured = captured;
+            std::fprintf(stderr, "XXII_GUEST_INPUT_CAPTURE active=%d\n", captured ? 1 : 0);
+            std::fflush(stderr);
+        }
+#endif
 		if (loop.paused.load(std::memory_order_acquire)) {
 			if (!timer.IsPaused()) {
 				timer.Pause();
