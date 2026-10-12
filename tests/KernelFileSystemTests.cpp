@@ -202,14 +202,17 @@ void TestTruncatedElfTables(const std::filesystem::path& root) {
     elf.Open(path);
     Check(!elf.IsValid(), description);
   };
+  std::fprintf(stderr, "Loader fixture: truncated program headers\n");
   header.e_phoff = sizeof(header);
   header.e_phnum = 1;
   check_rejected("truncated ELF program headers are rejected");
   header.e_phnum = 0;
   header.e_phoff = 0;
+  std::fprintf(stderr, "Loader fixture: overflowing section offset\n");
   header.e_shoff = UINT64_MAX;
   header.e_shnum = 1;
   check_rejected("overflowing ELF section header offset is rejected");
+  std::fprintf(stderr, "Loader fixture: no dynamic table\n");
   header.e_shoff = 0;
   header.e_shnum = 0;
   {
@@ -219,6 +222,7 @@ void TestTruncatedElfTables(const std::filesystem::path& root) {
   }
   Loader::Elf64 no_dynamic;
   no_dynamic.Open(path);
+  std::fprintf(stderr, "Loader fixture: Open(no dynamic) returned\n");
   Check(no_dynamic.IsValid() && no_dynamic.GetDynamic() == nullptr &&
             no_dynamic.GetDynValue(Loader::DT_NEEDED) == nullptr &&
             no_dynamic.GetDynList(Loader::DT_NEEDED).empty(),
@@ -1915,6 +1919,7 @@ int main(int argc, char** argv) {
   if (argc > 1 && std::strcmp(argv[1], "--loader-only") == 0) {
     TempDirectory temporary;
     TestTruncatedElfTables(temporary.Path());
+    std::fprintf(stderr, "Loader fixture: ELF checks passed; testing NIDs\n");
     TestDuplicateSymbolResolution();
     subsystems.Destroy();
     std::printf("Loader ELF/NID tests: all cases passed\\n");
