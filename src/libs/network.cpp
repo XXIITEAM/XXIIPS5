@@ -2298,12 +2298,13 @@ int KYTY_SYSV_ABI Setsockopt(int s, int level, int optname, const void* optval, 
 		if (optlen != sizeof(int)) {
 			return SetGuestSocketError(Posix::POSIX_EINVAL);
 		}
-		int usec = 0;
-		std::memcpy(&usec, optval, sizeof(usec));
-		usec = std::max(usec, 0);
+		int guest_timeout = 0;
+		std::memcpy(&guest_timeout, optval, sizeof(guest_timeout));
+		// SO_RCVTIMEO uses milliseconds; preserve the full int32 range before
+		// converting to the host unit (microseconds on POSIX).
+		int64_t usec = std::max<int64_t>(guest_timeout, 0);
 		if (receive_timeout) {
-			// SO_RCVTIMEO guest values are milliseconds, unlike SO_SNDTIMEO.
-			usec = static_cast<int>(std::min<int64_t>(static_cast<int64_t>(usec) * 1000, INT32_MAX));
+			usec *= 1000;
 		}
 #if defined(_WIN32)
 		timeout = static_cast<DWORD>((static_cast<int64_t>(usec) + 999) / 1000);
