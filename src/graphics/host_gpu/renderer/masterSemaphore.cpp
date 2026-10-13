@@ -11,6 +11,24 @@
 namespace Libs::Graphics {
 
 namespace {
+// Vulkan enum 4 is an unknown instruction pointer; it is NOT evidence of a
+// bad instruction or an invalid memory read. Report the enum name, not a GPU
+// virtual address, so CI logs remain useful and privacy-conscious.
+const char* DeviceFaultAddressKind(VkDeviceFaultAddressTypeEXT type) {
+    switch (type) {
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_NONE_EXT: return "none";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT: return "read_invalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT: return "write_invalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT: return "execute_invalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT:
+            return "instruction_pointer_unknown";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT:
+            return "instruction_pointer_invalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT:
+            return "instruction_pointer_fault";
+        default: return "unrecognized";
+    }
+}
 // Preserve the actual Vulkan error and timeline state: an unspecified
 // EXIT_NOT_IMPLEMENTED only reports source:line, masking device-lost causes.
 // Never treat a failed wait as completed GPU work.
@@ -86,6 +104,8 @@ void MasterSemaphore::DumpDeviceFault() const {
     constexpr uint32_t max_faults = 8;
     std::array<VkDeviceFaultAddressInfoEXT, max_faults> addresses {};
     std::array<VkDeviceFaultVendorInfoEXT, max_faults> vendors {};
+    const uint32_t available_addresses = counts.addressInfoCount;
+    const uint32_t available_vendors = counts.vendorInfoCount;
     const uint32_t addresses_to_query = std::min(counts.addressInfoCount, max_faults);
     const uint32_t vendors_to_query = std::min(counts.vendorInfoCount, max_faults);
     const auto vendor_binary_size = counts.vendorBinarySize;
@@ -98,14 +118,17 @@ void MasterSemaphore::DumpDeviceFault() const {
     info.pVendorInfos = vendors_to_query ? vendors.data() : nullptr;
     result = get_fault(device, &counts, &info);
     std::fprintf(stderr,
-        "XXII_DEVICE_FAULT_INFO result=%d addresses=%u vendors=%u binary_available=%d\n",
-        int(result), counts.addressInfoCount, counts.vendorInfoCount,
+        "XXII_DEVICE_FAULT_INFO result=%d addresses=%u available_addresses=%u"
+        " vendors=%u available_vendors=%u binary_available=%d\n",
+        int(result), counts.addressInfoCount, available_addresses,
+        counts.vendorInfoCount, available_vendors,
         vendor_binary_size > 0 ? 1 : 0);
     if (result == VK_SUCCESS || result == VK_INCOMPLETE) {
         for (uint32_t i = 0; i < std::min(counts.addressInfoCount, max_faults); ++i) {
             std::fprintf(stderr,
-                "XXII_DEVICE_FAULT_ADDRESS index=%u type=%d precision=%" PRIu64 "\n",
+                "XXII_DEVICE_FAULT_ADDRESS index=%u type=%d kind=%s precision=%" PRIu64 "\n",
                 i, int(addresses[i].addressType),
+                DeviceFaultAddressKind(addresses[i].addressType),
                 static_cast<uint64_t>(addresses[i].addressPrecision));
         }
         for (uint32_t i = 0; i < std::min(counts.vendorInfoCount, max_faults); ++i) {

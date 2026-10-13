@@ -902,6 +902,12 @@ void WindowContext::CreateVulkan() {
 
 	VulkanExtensions r;
 	VulkanGetExtensions(r);
+    if (std::getenv("XXII_COMPAT_PROBE")) {
+        std::fprintf(stderr, "XXII_GPU_AV requested=%d enabled=%d\n",
+                     Config::GpuAssistedValidationEnabled() ? 1 : 0,
+                     Config::GpuAssistedValidationEnabled() && r.enable_validation_layers ? 1 : 0);
+        std::fflush(stderr);
+    }
 	VulkanCheckInstanceVersion();
 
 	vk::ApplicationInfo app_info {};
