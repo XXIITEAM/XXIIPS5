@@ -278,6 +278,33 @@ bool SpirvContainsOpcode(const std::vector<uint32_t> &binary, uint32_t opcode) {
   return false;
 }
 
+// Check the actual constant operand of an atomic instruction, not just its
+// opcode: a relaxed LDS RMW compiles but fails to synchronize with the
+// acquire/release loads and exchanges emitted elsewhere in that shader.
+bool SpirvAtomicUsesSemantics(const std::vector<uint32_t> &binary,
+                              uint32_t atomic_opcode, uint32_t expected) {
+  for (size_t i = 5; i < binary.size();) {
+    const uint32_t word_count = binary[i] >> 16u;
+    if (word_count == 0 || i + word_count > binary.size()) return false;
+    if ((binary[i] & 0xffffu) == atomic_opcode && word_count >= 6u) {
+      // OpAtomicLoad/Exchange/RMW operands:
+      // result type, result, pointer, scope, memory semantics constant ID.
+      const uint32_t semantics_id = binary[i + 5];
+      for (size_t j = 5; j < binary.size();) {
+        const uint32_t count = binary[j] >> 16u;
+        if (count == 0 || j + count > binary.size()) return false;
+        if ((binary[j] & 0xffffu) == 43u && count == 4u &&
+            binary[j + 2] == semantics_id && binary[j + 3] == expected) {
+          return true;
+        }
+        j += count;
+      }
+    }
+    i += word_count;
+  }
+  return false;
+}
+
 uint32_t SpirvInstructionOpcodeCount(const std::vector<uint32_t> &binary,
                                      uint32_t opcode) {
   uint32_t count = 0;
@@ -7829,6 +7856,19 @@ void TestNewShaderRecompilerDsWideAndAtomicTranslation() {
         "SPIR-V binary does not contain OpAtomicUMax");
   Check(SpirvContainsOpcode(result.spirv, 241),
         "SPIR-V binary does not contain OpAtomicOr");
+  // Workgroup-memory Acquire loads must pair with AcquireRelease writes
+  // and LDS RMWs; the pre-fix atomics incorrectly used relaxed None.
+  constexpr uint32_t workgroup_memory = 0x100u;
+  Check(SpirvAtomicUsesSemantics(result.spirv, 227u, workgroup_memory | 0x2u),
+        "mixed LDS OpAtomicLoad must have Acquire+WorkgroupMemory semantics");
+  Check(SpirvAtomicUsesSemantics(result.spirv, 229u, workgroup_memory | 0x8u),
+        "mixed LDS OpAtomicExchange must have AcquireRelease+WorkgroupMemory semantics");
+  Check(SpirvAtomicUsesSemantics(result.spirv, 237u, workgroup_memory | 0x8u),
+        "LDS OpAtomicUMin must have AcquireRelease+WorkgroupMemory semantics");
+  Check(SpirvAtomicUsesSemantics(result.spirv, 239u, workgroup_memory | 0x8u),
+        "LDS OpAtomicUMax must have AcquireRelease+WorkgroupMemory semantics");
+  Check(SpirvAtomicUsesSemantics(result.spirv, 241u, workgroup_memory | 0x8u),
+        "LDS OpAtomicOr must have AcquireRelease+WorkgroupMemory semantics");
   CheckSpirvBinaryValidates(result.spirv);
 }
 

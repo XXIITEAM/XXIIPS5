@@ -417,18 +417,37 @@ uint32_t EmitAtomicOperation(ValueEmitContext& ctx, const IR::Inst& inst, uint32
 	const auto old    = ctx.state.builder.AllocateId();
 	const bool wide   = inst.GetType() == IR::Type::U64;
 	const auto type   = wide ? TypeU64(ctx.state) : TypeU32(ctx.state);
+
+	// DS atomics on LDS share dwords with DS loads/stores. Those accesses are
+	// emitted as Acquire loads and AcquireRelease exchanges for mixed-atomic
+	// shaders, so a relaxed (None) DS RMW cannot publish the previous
+	// invocation's writes. Pair each LDS RMW with the same storage-class
+	// semantics. Do not change buffer/image/GDS atomics without a separate
+	// behavioral test and a synchronization audit.
+	const bool lds = ctx.Memory(inst).kind == IR::ResourceKind::Lds;
+	const uint32_t memory = ctx.state.lds_storage_class == spv::StorageClassStorageBuffer
+	                            ? spv::MemorySemanticsUniformMemoryMask
+	                            : spv::MemorySemanticsWorkgroupMemoryMask;
+	const uint32_t success_semantics = lds
+	    ? (spv::MemorySemanticsAcquireReleaseMask | memory)
+	    : spv::MemorySemanticsMaskNone;
+	// Vulkan disallows Release and AcquireRelease on failed compare-exchange.
+	const uint32_t failure_semantics = lds
+	    ? (spv::MemorySemanticsAcquireMask | memory)
+	    : spv::MemorySemanticsMaskNone;
+
 	if (opcode == spv::OpAtomicCompareExchange) {
 		const auto desired    = ctx.Arg(inst, inst.NumArgs() - 3);
 		const auto comparator = ctx.Arg(inst, inst.NumArgs() - 2);
 		ctx.state.builder.AddFunction(
 		    spv::OpAtomicCompareExchange, TypeU32(ctx.state), old, pointer,
-		    ConstantU32(ctx.state, scope), ConstantU32(ctx.state, spv::MemorySemanticsMaskNone),
-		    ConstantU32(ctx.state, spv::MemorySemanticsMaskNone), desired, comparator);
+		    ConstantU32(ctx.state, scope), ConstantU32(ctx.state, success_semantics),
+		    ConstantU32(ctx.state, failure_semantics), desired, comparator);
 	} else {
 		const auto value = ctx.Arg(inst, inst.NumArgs() - 2);
 		ctx.state.builder.AddFunction(opcode, type, old, pointer,
 		                              ConstantU32(ctx.state, scope),
-		                              ConstantU32(ctx.state, spv::MemorySemanticsMaskNone), value);
+		                              ConstantU32(ctx.state, success_semantics), value);
 	}
 	return old;
 }
