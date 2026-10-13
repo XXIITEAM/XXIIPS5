@@ -7748,6 +7748,9 @@ void TestNewShaderRecompilerDsWideAndAtomicTranslation() {
       EncodeDs0(0x76, 16), EncodeDs1(20, 0, 1), // ds_read_b64 v[20:21], v1
       EncodeDs0(0xfe, 20), EncodeDs1(24, 0, 1), // ds_read_b96 v[24:26], v1
       EncodeDs0(0xff, 24), EncodeDs1(28, 0, 1), // ds_read_b128 v[28:31], v1
+      // Consume one LDS load result in a side-effecting write so DCE
+      // cannot remove all OpAtomicLoad instructions from this fixture.
+      EncodeDs0(0x0d, 40), EncodeDs1(0, 20, 1), // ds_write_b32 v20, v1
       EncodeDs0(0x07, 28), EncodeDs1(0, 32, 1), // ds_min_u32 v32, v1
       EncodeDs0(0x08, 32), EncodeDs1(0, 33, 1), // ds_max_u32 v33, v1
       EncodeDs0(0x0a, 36), EncodeDs1(0, 34, 1), // ds_or_b32 v34, v1
@@ -7814,9 +7817,10 @@ void TestNewShaderRecompilerDsWideAndAtomicTranslation() {
   Check((result.decoded_dump.find("dwords=4 bits=32") != std::string::npos),
         "new decoder did not expose DS wide width metadata");
   // Mixed DS read/write and atomic operations may target the same LDS
-  // dwords. Stores must use OpAtomicExchange. The unused DS read results
-  // are eliminated by DCE in this fixture, so do not assert OpAtomicLoad
-  // unless a separate test consumes the read result.
+  // dwords. The scalar store consumes v20 from DS_READ_B64 so DCE cannot
+  // remove the LDS word load under test.
+  Check(SpirvContainsOpcode(result.spirv, 227),
+        "consumed LDS dword must use OpAtomicLoad in mixed-atomic shader");
   Check(SpirvContainsOpcode(result.spirv, 229),
         "mixed LDS shader must atomically exchange dword stores (OpAtomicExchange)");
   Check(SpirvContainsOpcode(result.spirv, 237),
