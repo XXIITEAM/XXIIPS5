@@ -1329,41 +1329,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u, shader_fingerprint);
 	}
-    // Diagnostic-only draw isolation. This is NOT a rendering workaround:
-    // omitting guest graphics changes output and may disrupt downstream
-    // dependencies. It can only run in a separately tagged, bounded CI probe
-    // for a single shader fingerprint and the known 600-index draw class.
-    static const uint32_t isolate_fingerprint = [] {
-        const char* probe = std::getenv("XXII_COMPAT_PROBE");
-        if (!probe || std::strcmp(probe, "1") != 0) return uint32_t {0};
-        const char* text = std::getenv("XXII_COMPAT_SKIP_DRAW_FINGERPRINT");
-        if (!text || !*text) return uint32_t {0};
-        char* end = nullptr;
-        const auto value = std::strtoul(text, &end, 10);
-        return end != text && *end == '\0' && value <= UINT32_MAX
-                   ? static_cast<uint32_t>(value) : uint32_t {0};
-    }();
-    const uint64_t guest_tick = m_context.GetCommandScheduler().CurrentTick();
-    const bool isolate_draw = isolate_fingerprint != 0 && draw.IsIndexed() &&
-                              draw.index_count == 600 &&
-                              shader_fingerprint == isolate_fingerprint &&
-                              guest_tick >= 28500;
-    if (isolate_draw) {
-        static std::atomic<uint32_t> omitted_count {0};
-        const uint32_t count = omitted_count.fetch_add(1, std::memory_order_relaxed) + 1;
-        SetDrawDebugPhase(buffer, submit_id, draw, 0xA11u, shader_fingerprint);
-        if (count <= 8) {
-            std::fprintf(stderr,
-                         "XXII_DRAW_ISOLATION omitted=%u fingerprint=%u index_count=%u"
-                         " tick=%" PRIu64 "\n",
-                         count, shader_fingerprint, draw.index_count, guest_tick);
-            std::fflush(stderr);
-        }
-    } else if (mesh_active) {
-        vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
-    } else {
-        EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
-    }
+	if (mesh_active) {
+		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
+	} else {
+		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
+	}
 
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u, shader_fingerprint);
