@@ -34,6 +34,10 @@ void ReportSemaphoreError(const char* operation, vk::Result result, uint64_t wan
 MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics) {
     const char* probe = std::getenv("XXII_COMPAT_PROBE");
     m_traceEnabled = probe && probe[0] == '1' && probe[1] == '\0';
+    if (m_traceEnabled) {
+        std::fprintf(stderr, "XXII_GPU_BREADCRUMB_INIT capacity=%zu\n", TraceCapacity);
+        std::fflush(stderr);
+    }
 	vk::SemaphoreTypeCreateInfo type_info {};
 	type_info.semaphoreType = vk::SemaphoreType::eTimeline;
 	type_info.initialValue  = 0;
@@ -69,6 +73,7 @@ void MasterSemaphore::DumpRecentSubmissions() const {
         for (size_t i = 0; i < count; ++i)
             snapshot[i] = m_trace[(oldest + i) % TraceCapacity];
     }
+    std::fprintf(stderr, "XXII_GPU_BREADCRUMB_COUNT count=%zu\n", count);
     for (size_t i = 0; i < count; ++i) {
         const auto& op = snapshot[i];
         std::fprintf(stderr,
