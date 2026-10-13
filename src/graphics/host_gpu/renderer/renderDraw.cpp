@@ -1216,9 +1216,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
     if (watched_fingerprint != 0 && shader_fingerprint == watched_fingerprint &&
         !reported_fingerprint.exchange(true, std::memory_order_relaxed)) {
         std::fprintf(stderr, "XXII_SHADER_META kind=draw fp=%u index_count=%u"
-                             " colors=%u pixel_active=%d vertex_stages=%u\n",
+                             " colors=%u pixel_active=%d vertex_stages=%u"
+                             " depth=%d depth_format=%u depth_test=%d"
+                             " depth_write=%d stencil_test=%d\n",
                      shader_fingerprint, draw.index_count, state.color_count,
-                     state.ps_active ? 1 : 0, state.programs.VertexStageCount());
+                     state.ps_active ? 1 : 0, state.programs.VertexStageCount(),
+                     state.depth_info.image_id ? 1 : 0,
+                     static_cast<uint32_t>(state.depth_info.desc.view_info.format),
+                     state.depth_info.depth_test_enable ? 1 : 0,
+                     state.depth_info.depth_write_enable ? 1 : 0,
+                     state.depth_info.stencil_test_enable ? 1 : 0);
         for (uint32_t i = 0; i < state.programs.VertexStageCount(); ++i) {
             const auto* shader = state.vertex_info[i].stage.program;
             if (!shader) continue;

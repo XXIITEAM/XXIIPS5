@@ -336,6 +336,32 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
             input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2],
             input_info.workgroup_counts[0], input_info.workgroup_counts[1],
             input_info.workgroup_counts[2]);
+        // Descriptor *shapes* only: formats, dimensions, access roles.
+        // Never report backing memory addresses, payloads or actual textures.
+        if (resources.images.size() == program.info.images.size()) {
+            for (size_t i = 0; i < program.info.images.size(); ++i) {
+                const auto& image = program.info.images[i];
+                const auto desc = DecodeNativeDescriptor<ShaderTextureResource>(resources.images[i]);
+                std::fprintf(stderr, "XXII_SHADER_META kind=image index=%zu"
+                                     " class=%u written=%d null=%d"
+                                     " type=%u format=%u size=%u,%u,%u\n",
+                             i, static_cast<uint32_t>(image.resource_class),
+                             image.written ? 1 : 0, desc.IsNull() ? 1 : 0,
+                             static_cast<uint32_t>(desc.Type()),
+                             static_cast<uint32_t>(desc.Format()),
+                             desc.Width5() + 1u, desc.Height5() + 1u, desc.Depth() + 1u);
+            }
+        }
+        if (resources.buffers.size() == program.info.buffers.size()) {
+            for (size_t i = 0; i < program.info.buffers.size(); ++i) {
+                const auto desc = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
+                std::fprintf(stderr, "XXII_SHADER_META kind=buffer index=%zu"
+                                     " written=%d stride=%u records=%u raw_format=%u\n",
+                             i, program.info.buffers[i].written ? 1 : 0,
+                             desc.Stride(), desc.NumRecords(),
+                             static_cast<uint32_t>(desc.RawFormat()));
+            }
+        }
         std::fflush(stderr);
     }
 	if (resources.specialization_reads.empty() &&
