@@ -14,6 +14,10 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <magic_enum.hpp>
 #include <vector>
@@ -611,6 +615,37 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 	if (deadline > now) {
 		Common::Thread::SleepMicro(deadline - now);
 	}
+
+    // Compatibility-only audio heartbeat. It measures PS5 HLE submissions,
+    // not audible content; no PCM, waveform or device identifiers are stored.
+    // This tells us whether guest audio continues during a Vulkan render
+    // stall, as reported on Syberia Remastered's second loading screen.
+    static const bool compatibility_probe = [] {
+        const char* enabled = std::getenv("XXII_COMPAT_PROBE");
+        return enabled && enabled[0] == '1' && enabled[1] == '\0';
+    }();
+    if (compatibility_probe) {
+        static std::atomic<uint64_t> output_calls {0};
+        static std::atomic<uint64_t> output_frames {0};
+        static std::atomic<uint64_t> device_batches {0};
+        static std::atomic<uint64_t> last_report_us {0};
+        const uint64_t calls = output_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+        output_frames.fetch_add(first_port.samples_num, std::memory_order_relaxed);
+        if (any_device) device_batches.fetch_add(1, std::memory_order_relaxed);
+        const uint64_t observed_us = LibKernel::KernelGetProcessTime();
+        auto previous = last_report_us.load(std::memory_order_relaxed);
+        if (observed_us >= previous && observed_us - previous >= 5000000 &&
+            last_report_us.compare_exchange_strong(previous, observed_us,
+                                                    std::memory_order_relaxed)) {
+            std::fprintf(stderr,
+                         "XXII_AUDIO_PROGRESS calls=%" PRIu64
+                         " frames=%" PRIu64 " device_batches=%" PRIu64
+                         " process_us=%" PRIu64 "\n",
+                         calls, output_frames.load(std::memory_order_relaxed),
+                         device_batches.load(std::memory_order_relaxed), observed_us);
+            std::fflush(stderr);
+        }
+    }
 
 	return first_port.samples_num;
 }
