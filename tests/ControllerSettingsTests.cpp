@@ -193,6 +193,58 @@ void TestPadPortOwnership() {
 	Shutdown();
 }
 
+void TestOverlayInputCaptureReset() {
+    Controller controller;
+    PadData data {};
+    const int handle = PadGetHandle(Config::GetUserId(), 0, 0);
+    Check(handle == 1, "overlay test could not open the standard pad");
+
+    // A held button, off-center sticks, analog triggers, and a pressed
+    // touchpad emulate real controls at the moment the PSVXXII menu opens.
+    SetButton(1, PAD_BUTTON_CROSS | PAD_BUTTON_OPTIONS, true);
+    SetAxis(1, Axis::LeftX, 0);
+    SetAxis(1, Axis::LeftY, 255);
+    SetAxis(1, Axis::RightX, 255);
+    SetAxis(1, Axis::RightY, 0);
+    SetAxis(1, Axis::TriggerLeft, 200);
+    SetAxis(1, Axis::TriggerRight, 240);
+    SetTouchPad(1, 0, true, 0.5f, 0.5f);
+    Check(PadReadState(handle, &data) == 0 &&
+              data.buttons != 0 && data.left_stick_x == 0 &&
+              data.right_stick_y == 0 && data.analog_buttons_l2 == 200 &&
+              data.touch_data.touch_num == 1,
+          "overlay test fixture did not produce active gameplay input");
+
+    // The guest uses this production reset at each menu boundary. A zero
+    // stick coordinate is full deflection; center MUST be 128.
+    ResetInputState();
+    Check(PadReadState(handle, &data) == 0 && data.connected &&
+              data.buttons == 0 && data.left_stick_x == 128 &&
+              data.left_stick_y == 128 && data.right_stick_x == 128 &&
+              data.right_stick_y == 128 && data.analog_buttons_l2 == 0 &&
+              data.analog_buttons_r2 == 0 && data.touch_data.touch_num == 0,
+          "menu capture kept gameplay buttons, sticks, triggers or touch latched");
+    PadData buffered[4] {};
+    Check(PadRead(handle, buffered, 4) >= 1 &&
+              buffered[0].buttons == 0 &&
+              buffered[0].left_stick_x == 128 &&
+              buffered[0].left_stick_y == 128,
+          "menu capture exposed stale queued input events");
+    Check(PadGetHandle(Config::GetUserId(), 0, 0) == handle,
+          "menu capture unexpectedly closed the guest pad");
+
+    SetButton(1, PAD_BUTTON_CROSS, true);
+    SetAxis(1, Axis::LeftX, 192);
+    Check(PadReadState(handle, &data) == 0 &&
+              data.buttons == PAD_BUTTON_CROSS &&
+              data.left_stick_x == 192,
+          "gamepad failed to resume after the system menu was closed");
+    ResetInputState();
+    Check(PadReadState(handle, &data) == 0 &&
+              data.buttons == 0 && data.left_stick_x == 128,
+          "second menu toggle did not release resumed gameplay input");
+}
+
 void TestSettingCycles() {
 	Controller controller;
 	for (auto setting:
@@ -554,6 +606,7 @@ void TestTriggerEffectState() {
 int main() {
 	Config::Initialize();
 	TestPadPortOwnership();
+	TestOverlayInputCaptureReset();
 	TestSettingCycles();
 	TestGlobalControllerLevels();
 	// Each following test initializes another controller and requires strong defaults.

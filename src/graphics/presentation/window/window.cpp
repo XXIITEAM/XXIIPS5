@@ -314,6 +314,35 @@ static bool GuestInputCaptured() {
     HANDLE gate = GuestInputGate();
     return gate && WaitForSingleObject(gate, 0) == WAIT_OBJECT_0;
 }
+
+// The PSVXXII system menu owns game input while visible. Window and device
+// lifecycle events still reach the guest; gameplay input cannot leak through
+// a parallel SDL event stream or the guest's own system dialogs.
+static bool IsGuestGameplayEvent(Uint32 type) {
+    switch (type) {
+        case SDL_EVENT_KEY_DOWN:
+        case SDL_EVENT_KEY_UP:
+        case SDL_EVENT_TEXT_INPUT:
+        case SDL_EVENT_TEXT_EDITING:
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+        case SDL_EVENT_MOUSE_MOTION:
+        case SDL_EVENT_MOUSE_WHEEL:
+        case SDL_EVENT_FINGER_DOWN:
+        case SDL_EVENT_FINGER_UP:
+        case SDL_EVENT_FINGER_MOTION:
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+        case SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN:
+        case SDL_EVENT_GAMEPAD_TOUCHPAD_UP:
+        case SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION:
+        case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
+            return true;
+        default:
+            return false;
+    }
+}
 #endif
 
 static void GameEventController([[maybe_unused]] const EventController& f) {
@@ -520,6 +549,11 @@ void WindowContext::ProcessDisplayEvent(const SDL_DisplayEvent& display) {
 void WindowContext::ProcessEvent(double time_s) {
 	auto& game  = loop;
 	auto* event = &game.event;
+#if defined(_WIN32)
+    if (GuestInputCaptured() && IsGuestGameplayEvent(event->type)) {
+        return;
+    }
+#endif
 	if ((event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) &&
 	    event->key.key == SDLK_F7) {
 		if (event->type == SDL_EVENT_KEY_DOWN && event->key.repeat == 0) {
@@ -784,33 +818,20 @@ void WindowContext::Run() {
 	auto               title_time        = SDL_GetTicks();
 	auto               title_frames      = loop.presented_frames.load(std::memory_order_relaxed);
 
+#if defined(_WIN32)
+    bool wasCaptured = false;
+#endif
 	while (!loop.need_exit) {
 #if defined(_WIN32)
-        // Drain held states once at the capture boundary, not each frame.
-        // This prevents walking/shooting from remaining latched behind a menu.
-        static bool wasCaptured = false;
+        // Reset the HLE controller state once at each menu boundary. Stick
+        // center is 128; the old SetAxis(0) sent full-left/full-up input and
+        // did not clear touchpads, triggers or virtual keyboard buttons.
         const bool captured = GuestInputCaptured();
         if (captured != wasCaptured) {
-            const int count = 0;
-            (void)count;
-            int padCount = 0;
-            SDL_JoystickID* pads = SDL_GetGamepads(&padCount);
-            if (pads) {
-                for (int i = 0; i < padCount; ++i) {
-                    const auto id = pads[i];
-                    for (int button = 0; button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
-                        const auto mapped = ControllerButtonToPadButton(button);
-                        if (mapped) Controller::SetButton(id, mapped, false);
-                    }
-                    Controller::SetAxis(id, Controller::Axis::LeftX, 0);
-                    Controller::SetAxis(id, Controller::Axis::LeftY, 0);
-                    Controller::SetAxis(id, Controller::Axis::RightX, 0);
-                    Controller::SetAxis(id, Controller::Axis::RightY, 0);
-                }
-                SDL_free(pads);
-            }
+            Controller::ResetInputState();
             wasCaptured = captured;
-            std::fprintf(stderr, "XXII_GUEST_INPUT_CAPTURE active=%d\n", captured ? 1 : 0);
+            std::fprintf(stderr, "XXII_GUEST_INPUT_CAPTURE active=%d neutral=1\n",
+                         captured ? 1 : 0);
             std::fflush(stderr);
         }
 #endif
@@ -870,7 +891,12 @@ void WindowContext::Run() {
             if (probeStage > 0) std::fflush(stderr);
         }
 #endif
-		const auto wait_ms = static_cast<int>(title_interval_ms - (now - title_time));
+		int wait_ms = static_cast<int>(title_interval_ms - (now - title_time));
+#if defined(_WIN32)
+        // Kernel event changes do not wake SDL_WaitEventTimeout. During
+        // embedded gameplay, poll the overlay gate at least every 32 ms.
+        if (GuestInputGate()) wait_ms = std::min(wait_ms, 32);
+#endif
 		if (!HostInputWaitEvent(&loop.event, wait_ms)) {
 			continue;
 		}
