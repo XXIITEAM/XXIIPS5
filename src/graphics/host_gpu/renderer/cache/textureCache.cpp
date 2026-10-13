@@ -196,11 +196,25 @@ TextureCache::BindingType TextureCache::UploadBinding(const Image& image) {
 	return image.usage.storage ? BindingType::Storage : BindingType::Texture;
 }
 
+void TextureCache::LogImageLifetime(GpuTrace::ResourceAction action, ImageId id,
+                                    const Image& image, uint64_t retire_tick) {
+    const uint32_t flags = (image.info.IsDepth() ? 1u : 0u) |
+                           (image.depth_id ? 2u : 0u) |
+                           (image.binding.is_bound ? 4u : 0u) |
+                           (image.registered ? 8u : 0u) |
+                           (image.backing.image != nullptr ? 16u : 0u);
+    m_scheduler.GetMasterSemaphore().RecordResourceEvent(
+        action, m_scheduler.CurrentTick(), retire_tick, id.index, id.generation,
+        static_cast<uint32_t>(image.info.pixel_format), flags, image.info.data.size);
+}
+
 ImageId TextureCache::InsertImage(const ImageInfo& info) {
 	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
+	m_slot_images[id].SetDiagnosticId(id);
 	if (!info.data.Empty()) {
 		RegisterImage(id);
 	}
+	LogImageLifetime(GpuTrace::ResourceAction::Created, id, m_slot_images[id]);
 	return id;
 }
 
@@ -277,8 +291,16 @@ void TextureCache::DeleteImage(ImageId id) {
 	}
 	UnregisterImage(id);
 	if (m_scheduler.Active()) {
-		m_scheduler.DeferOperation([this, id] { m_slot_images.erase(id); });
+		const uint64_t retire_tick = m_scheduler.CurrentTick();
+		LogImageLifetime(GpuTrace::ResourceAction::RetireQueued, id, *image, retire_tick);
+		m_scheduler.DeferOperation([this, id, retire_tick] {
+			if (const auto* retired = m_slot_images.try_get(id))
+				LogImageLifetime(GpuTrace::ResourceAction::RetireExecuted,
+				                 id, *retired, retire_tick);
+			m_slot_images.erase(id);
+		});
 	} else {
+		LogImageLifetime(GpuTrace::ResourceAction::RetireImmediate, id, *image);
 		m_slot_images.erase(id);
 	}
 }
@@ -1306,6 +1328,12 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		}
 		image.tick_accessed_last = m_scheduler.CurrentTick();
 		TouchImage(image);
+		if (m_scheduler.Active())
+			m_scheduler.Current().RecordGpuTrace(
+			    GpuTrace::Kind::ImageLookup, result.index, result.generation,
+			    static_cast<uint32_t>(desc.type),
+			    static_cast<uint32_t>(image.info.pixel_format),
+			    image.backing.image != nullptr ? 1u : 0u);
 	}
 	MaterializeColorClear(result, desc, metadata_base_layer);
 	if (desc.type == BindingType::VideoOut &&
@@ -1408,7 +1436,14 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 			break;
 		default: EXIT("TextureCache: invalid texture binding\n");
 	}
-	return image.FindView(desc.view_info);
+	const auto view = image.FindView(desc.view_info);
+	if (m_scheduler.Active())
+		m_scheduler.Current().RecordGpuTrace(
+		    GpuTrace::Kind::ImageViewBound, id.index, id.generation,
+		    static_cast<uint32_t>(desc.type),
+		    static_cast<uint32_t>(image.backing.format),
+		    static_cast<uint32_t>(desc.view_info.format));
+	return view;
 }
 
 vk::ImageView TextureCache::FindRenderTarget(ImageId id, const ImageDesc& desc) {
@@ -1426,7 +1461,14 @@ vk::ImageView TextureCache::FindRenderTarget(ImageId id, const ImageDesc& desc) 
 	RefreshImage(id);
 	CommitGpuWrite(image);
 	TrackImageDownload(id, image);
-	return image.FindView(desc.view_info);
+	const auto view = image.FindView(desc.view_info);
+	if (m_scheduler.Active())
+		m_scheduler.Current().RecordGpuTrace(
+		    GpuTrace::Kind::ImageViewBound, id.index, id.generation,
+		    static_cast<uint32_t>(desc.type),
+		    static_cast<uint32_t>(image.backing.format),
+		    static_cast<uint32_t>(desc.view_info.format));
+	return view;
 }
 
 vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
@@ -1465,7 +1507,14 @@ vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 	if (desc.info.HasStencil()) {
 		RefreshImage(AssociateStencil(id, desc.info.stencil));
 	}
-	return image.FindView(desc.view_info);
+	const auto view = image.FindView(desc.view_info);
+	if (m_scheduler.Active())
+		m_scheduler.Current().RecordGpuTrace(
+		    GpuTrace::Kind::ImageViewBound, id.index, id.generation,
+		    static_cast<uint32_t>(desc.type),
+		    static_cast<uint32_t>(image.backing.format),
+		    static_cast<uint32_t>(desc.view_info.format));
+	return view;
 }
 
 void TextureCache::MarkGpuWritten(ImageId id) {

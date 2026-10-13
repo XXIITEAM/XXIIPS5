@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
 
 namespace Libs::Graphics {
 
@@ -68,7 +70,22 @@ void GraphicContext::LogMemoryBudget() const {
 	const auto& properties = GetPhysicalDeviceMemoryProperties();
 	VmaBudget   budgets[VK_MAX_MEMORY_HEAPS] {};
 	vmaGetHeapBudgets(allocator, budgets);
+	const char* memory_trace = std::getenv("XXII_COMPAT_GPU_MEMORY_TRACE");
+	const bool report_trace = memory_trace && memory_trace[0] == '1' &&
+	                          memory_trace[1] == '\0';
 	for (uint32_t i = 0; i < properties.memoryHeapCount; i++) {
+		if (report_trace) {
+			std::fprintf(stderr,
+			             "XXII_GPU_MEMORY_HEAP heap=%u local=%u usage=%" PRIu64
+			             " budget=%" PRIu64 " allocations=%" PRIu64 " blocks=%" PRIu64 "\n",
+			             i, static_cast<bool>(properties.memoryHeaps[i].flags &
+			                                  vk::MemoryHeapFlagBits::eDeviceLocal) ? 1u : 0u,
+			             static_cast<uint64_t>(budgets[i].usage),
+			             static_cast<uint64_t>(budgets[i].budget),
+			             static_cast<uint64_t>(budgets[i].statistics.allocationBytes),
+			             static_cast<uint64_t>(budgets[i].statistics.blockBytes));
+			std::fflush(stderr);
+		}
 		LOGF("VMA heap %u: usage=%" PRIu64 ", budget=%" PRIu64 ", allocation=%" PRIu64
 		     ", blocks=%" PRIu64 "\n",
 		     i, static_cast<uint64_t>(budgets[i].usage), static_cast<uint64_t>(budgets[i].budget),

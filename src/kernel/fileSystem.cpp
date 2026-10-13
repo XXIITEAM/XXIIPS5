@@ -20,6 +20,7 @@
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <random>
 #include <system_error>
@@ -410,6 +411,19 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 		return KERNEL_ERROR_EINVAL;
 	}
 
+
+	// Keep at most eight guest filenames, plus any explicit Unity boot.config,
+	// so we can verify which PS5 file I/O route the engine actually uses.
+	if (const char* probe = std::getenv("XXII_COMPAT_PROBE");
+	    probe != nullptr && probe[0] == '1' && probe[1] == '\0') {
+		static std::atomic_uint file_samples {0};
+		const uint32_t sample = file_samples.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (sample <= 8 || std::strstr(path, "boot.config") != nullptr) {
+			std::fprintf(stderr, "XXII_UNITY_FS_OPEN sample=%u flags=%u path=%.120s\n",
+			             sample, static_cast<unsigned>(flags), path);
+			std::fflush(stderr);
+		}
+	}
 	auto flags_u = static_cast<uint32_t>(flags);
 
 	LOGF("\t path = %s\n"
@@ -469,6 +483,27 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 	}
 
 	file->real_name = g_mount_points->ResolvePath(file->name);
+	// Unity native graphics jobs differential test: when explicitly opted in,
+	// read a project-local substitute boot.config. The original game stays read-only.
+	if (rw_mode == Common::File::Mode::Read && !creat && !trunc &&
+	    (file->name == "/app0/Media/boot.config" ||
+	     file->name == "/hostapp/Media/boot.config")) {
+		const char* probe = std::getenv("XXII_COMPAT_PROBE");
+		const char* overlay = std::getenv("XXII_COMPAT_UNITY_BOOT_OVERLAY");
+		if (probe != nullptr && probe[0] == '1' && probe[1] == '\0' &&
+		    overlay != nullptr && *overlay != '\0') {
+			const std::filesystem::path alternate = Common::PathFromUtf8(overlay);
+			std::error_code ec;
+			if (std::filesystem::is_regular_file(alternate, ec) && !ec &&
+			    std::filesystem::file_size(alternate, ec) <= 4096 && !ec) {
+				file->real_name = alternate;
+				std::fprintf(stderr, "XXII_UNITY_BOOT_OVERLAY_APPLIED yes\n");
+			} else {
+				std::fprintf(stderr, "XXII_UNITY_BOOT_OVERLAY_APPLIED no invalid_file\n");
+			}
+			std::fflush(stderr);
+		}
+	}
 	if (file->real_name.empty()) {
 		g_files->DeleteDescriptor(descriptor);
 		return KERNEL_ERROR_ENOENT;

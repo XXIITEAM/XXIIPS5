@@ -578,6 +578,37 @@ add_executable(image_page_table_tests EXCLUDE_FROM_ALL
 target_link_libraries(image_page_table_tests common fmt::fmt)
 target_include_directories(image_page_table_tests PRIVATE ${inc_headers})
 
+add_executable(image_barrier_policy_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ImageBarrierPolicyTests.cpp"
+)
+target_link_libraries(image_barrier_policy_tests common fmt::fmt Vulkan::Headers)
+target_include_directories(image_barrier_policy_tests PRIVATE ${inc_headers})
+
+add_executable(gpu_flight_recorder_tests EXCLUDE_FROM_ALL
+    "${KYTY_TESTS_DIR}/GpuFlightRecorderTests.cpp"
+)
+target_include_directories(gpu_flight_recorder_tests PRIVATE ${inc_headers})
+
+add_executable(gpu_descriptor_bounds_tests EXCLUDE_FROM_ALL
+    "${KYTY_TESTS_DIR}/GpuDescriptorBoundsTests.cpp"
+)
+target_include_directories(gpu_descriptor_bounds_tests PRIVATE ${inc_headers})
+
+add_executable(gpu_resource_lifetime_tests EXCLUDE_FROM_ALL
+    "${KYTY_TESTS_DIR}/GpuResourceLifetimeTests.cpp"
+)
+target_include_directories(gpu_resource_lifetime_tests PRIVATE ${inc_headers})
+
+add_executable(gpu_index_bounds_tests EXCLUDE_FROM_ALL
+    "${KYTY_TESTS_DIR}/GpuIndexBoundsTests.cpp"
+)
+target_include_directories(gpu_index_bounds_tests PRIVATE ${inc_headers})
+
+add_executable(hle_trace_tests EXCLUDE_FROM_ALL
+    "${KYTY_TESTS_DIR}/HleTraceTests.cpp"
+)
+target_include_directories(hle_trace_tests PRIVATE ${inc_headers})
+
 add_kyty_full_emulator_test(shader_recompiler_compute_tests "${KYTY_TESTS_DIR}/ShaderRecompilerComputeTests.cpp")
 
 set(gpu_test_generated_dir "${PROJECT_BINARY_DIR}/gpu_test_shaders")
@@ -614,6 +645,20 @@ if(NOT KYTY_CLANG_CL)
 endif()
 
 if(BUILD_TESTING)
+    # Optional tests inspect synthetic numeric GPU logs only: no game files or GPU required.
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME gpu_incident_diagnostics_python
+                 COMMAND ${Python3_EXECUTABLE} -m unittest discover
+                         -s "${KYTY_TESTS_DIR}" -p "test_gpu_*py")
+        set_tests_properties(gpu_incident_diagnostics_python PROPERTIES
+                             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME psvxxii_triage_delta_python
+                 COMMAND ${Python3_EXECUTABLE} -m unittest discover
+                         -s "${KYTY_TESTS_DIR}" -p "test_psvxxii_triage_compare.py")
+        set_tests_properties(psvxxii_triage_delta_python PROPERTIES
+                             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    endif()
 	add_test(NAME emulator_user_name_cli
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --user-name 1234567890123456)
 	add_test(NAME emulator_user_name_too_long
@@ -628,6 +673,12 @@ if(BUILD_TESTING)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
+	add_test(NAME image_barrier_policy COMMAND $<TARGET_FILE:image_barrier_policy_tests>)
+	add_test(NAME gpu_flight_recorder COMMAND $<TARGET_FILE:gpu_flight_recorder_tests>)
+	add_test(NAME gpu_descriptor_bounds COMMAND $<TARGET_FILE:gpu_descriptor_bounds_tests>)
+	add_test(NAME gpu_resource_lifetime COMMAND $<TARGET_FILE:gpu_resource_lifetime_tests>)
+	add_test(NAME gpu_index_bounds COMMAND $<TARGET_FILE:gpu_index_bounds_tests>)
+	add_test(NAME hle_trace COMMAND $<TARGET_FILE:hle_trace_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
@@ -730,6 +781,12 @@ if(BUILD_TESTING)
 		shader_cfg_tests
 		scalar_provenance_tests
 		image_page_table_tests
+		image_barrier_policy_tests
+		gpu_flight_recorder_tests
+		gpu_descriptor_bounds_tests
+		gpu_resource_lifetime_tests
+		gpu_index_bounds_tests
+		hle_trace_tests
 		memory_tracker_tests
 		page_manager_tests
 		archive_file_tests

@@ -2,12 +2,15 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_MASTERSEMAPHORE_H_
 
 #include "common/common.h"
+#include "graphics/host_gpu/renderer/gpuFlightRecorder.h"
+#include "graphics/host_gpu/renderer/gpuResourceLifetime.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <atomic>
 #include <array>
 #include <cstddef>
 #include <mutex>
+#include <memory>
 
 namespace Libs::Graphics {
 
@@ -37,8 +40,13 @@ public:
     // only numeric GPU operation metadata, never guest instructions/shaders.
     void RecordSubmission(uint64_t tick, uint32_t operation, uint64_t submitId,
                           uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint64_t e,
-                          uint64_t checkpoint_marker);
+                          uint64_t checkpoint_marker,
+                          const GpuTrace::CommandTrace& commands);
     void DumpRecentSubmissions() const;
+    void SampleFlightRecorder(uint64_t submitted_tick) const;
+    void RecordResourceEvent(GpuTrace::ResourceAction action, uint64_t tick,
+                             uint64_t retire_tick, uint32_t slot, uint32_t generation,
+                             uint32_t format, uint32_t flags, uint64_t bytes);
     void DumpDeviceFault() const;
     void DumpCheckpoints() const;
 
@@ -61,6 +69,11 @@ private:
     size_t m_traceHead = 0;
     size_t m_traceCount = 0;
     bool m_traceEnabled = false;
+    // A full recorder is about a megabyte. Allocate only in opt-in probes:
+    // CommandScheduler can otherwise live on the Windows test thread stack.
+    std::unique_ptr<GpuTrace::FlightRecorder> m_flight_recorder;
+    bool m_resource_trace_enabled = false;
+    GpuTrace::ResourceLifetimeHistory m_resource_history;
 };
 
 } // namespace Libs::Graphics

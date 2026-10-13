@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/nullTextureFormat.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptorBounds.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -1134,12 +1135,46 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			const auto& resource = program.info.images[i];
 			const auto& texture = descriptors.images[i];
 			EXIT_IF(resource.mip_count != (texture.mip_views.empty() ? 1u : texture.mip_views.size()));
-			const auto kind = *ShaderRecompiler::IR::DescriptorBindingForImage(resource);
-			const auto start = image_starts[ShaderRecompiler::IR::ImageBindingIndex(kind)] +
-			                   resource.descriptor_index;
+			const auto binding_kind = ShaderRecompiler::IR::DescriptorBindingForImage(resource);
+			EXIT_IF(!binding_kind);
+			const auto kind = *binding_kind;
+			const auto kind_index = static_cast<size_t>(kind);
+			const auto image_index = ShaderRecompiler::IR::ImageBindingIndex(kind);
+			EXIT_IF(kind_index >= program.bindings.descriptor_counts.size() ||
+			        image_index >= image_starts.size());
+			const auto binding_start = image_starts[image_index];
+			const auto binding_count = program.bindings.descriptor_counts[kind_index];
+			if (!FitsImageDescriptorSpan(m_descriptor_images.size(), binding_start,
+			                             binding_count, resource.descriptor_index,
+			                             resource.mip_count)) {
+				std::fprintf(stderr,
+				             "XXII_GPU_DESCRIPTOR_RANGE_INVALID stage=%u binding=%zu "
+				             "array_size=%zu start=%zu binding_count=%u "
+				             "descriptor_offset=%u mip_count=%u\n",
+				             static_cast<uint32_t>(program.stage), kind_index,
+				             m_descriptor_images.size(), binding_start, binding_count,
+				             resource.descriptor_index, resource.mip_count);
+				std::fflush(stderr);
+				EXIT("compiled image descriptor span exceeds host descriptor array\n");
+			}
+			const auto start = binding_start + resource.descriptor_index;
 			for (uint32_t mip = 0; mip < resource.mip_count; ++mip) {
 				m_descriptor_images[start + mip] = MakeImageInfo(texture, mip);
 			}
+			// Actual descriptor resource metadata, without raw handles or addresses.
+			if (i < 8)
+				buffer.RecordGpuTrace(GpuTrace::Kind::DescriptorImage,
+				                      static_cast<uint32_t>(texture.desc.type),
+				                      static_cast<uint32_t>(texture.layout),
+				                      resource.depth_compare ? 1u : 0u,
+				                      static_cast<uint32_t>(texture.desc.info.guest_format),
+				                      (uint64_t {resource.descriptor_index} << 32u) |
+				                          resource.mip_count);
+			if (i < 8)
+				buffer.RecordGpuTrace(GpuTrace::Kind::DescriptorImageIdentity,
+				                      texture.image_id.index, texture.image_id.generation,
+				                      resource.descriptor_index, resource.mip_count,
+				                      static_cast<uint32_t>(texture.layout));
             // Binding 24 in a compute pipeline is a floating depth-compare
             // sampled 2D texture. Vulkan VUID-06479 reports R32_SFLOAT
             // there; retain bounded format metadata of the *actual* image
@@ -1180,6 +1215,17 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		const auto shader_data_dwords = program.bindings.ShaderDataDwords();
 		EXIT_IF(prepared->shader_data.size() != shader_data_dwords);
 		if (program.bindings.UsesPushData()) {
+			if (!ShaderRecompiler::IR::PushData::CanFit(
+			        program.bindings.push_data_start_dword, shader_data_dwords)) {
+				std::fprintf(stderr,
+				             "XXII_GPU_PUSH_DATA_RANGE_INVALID stage=%u start=%u "
+				             "dwords=%u capacity=%u\n",
+				             static_cast<uint32_t>(program.stage),
+				             program.bindings.push_data_start_dword, shader_data_dwords,
+				             ShaderRecompiler::IR::PushData::DwordCount);
+				std::fflush(stderr);
+				EXIT("compiled push data exceeds host push constant capacity\n");
+			}
 			std::ranges::copy(prepared->shader_data,
 			                  push_data.dwords.begin() + program.bindings.push_data_start_dword);
 			has_push_data = true;
@@ -1192,11 +1238,21 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	}
 
 	if (!m_descriptor_writes.empty()) {
+		for (size_t i = 0; i < std::min<size_t>(m_descriptor_writes.size(), 8); ++i) {
+			const auto& write = m_descriptor_writes[i];
+			buffer.RecordGpuTrace(GpuTrace::Kind::DescriptorBinding,
+			                      write.dstBinding, write.descriptorCount,
+			                      static_cast<uint32_t>(write.descriptorType),
+			                      write.dstArrayElement);
+		}
 		EXIT_IF(pipeline.descriptor_set_layout == nullptr);
 		if (pipeline.uses_push_descriptors) {
 			vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0,
 			                               static_cast<uint32_t>(m_descriptor_writes.size()),
 			                               m_descriptor_writes.data());
+			buffer.RecordGpuTrace(GpuTrace::Kind::DescriptorWrites,
+			                      static_cast<uint32_t>(m_descriptor_writes.size()),
+			                      static_cast<uint32_t>(image_descriptor_count), 1);
 		} else {
 			const auto set = m_context.GetDescriptorHeap().Commit(pipeline.descriptor_set_layout);
 			for (auto& write: m_descriptor_writes) {
@@ -1207,6 +1263,9 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			    nullptr);
 			vk_buffer.bindDescriptorSets(pipeline_bind_point, pipeline.pipeline_layout, 0, 1, &set,
 			                             0, nullptr);
+			buffer.RecordGpuTrace(GpuTrace::Kind::DescriptorBind,
+			                      static_cast<uint32_t>(m_descriptor_writes.size()),
+			                      static_cast<uint32_t>(image_descriptor_count), 0);
 		}
 	}
 }

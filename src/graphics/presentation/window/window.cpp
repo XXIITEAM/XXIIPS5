@@ -20,6 +20,7 @@
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/window/hostInput.h"
 #include "graphics/presentation/window/windowInternal.h"
+#include "common/diagnostics/debugAudio.h"
 #include "kytyGitVersion.h"
 #include "libs/controller.h"
 #include "loader/systemContent.h"
@@ -926,7 +927,18 @@ static void WindowCreate(WindowContext& context) {
     // reach the guest. Enable it *before* initializing SDL gamepads.
     const char* embedded_parent = std::getenv("XXII_EMBED_PARENT");
     const bool embedded_requested = embedded_parent != nullptr && embedded_parent[0] != '\0';
+    const char* comfortFlag = std::getenv("XXII_DEBUG_NO_ACTIVATE");
+    const bool debug_no_activate = comfortFlag && comfortFlag[0] == '1' &&
+                                   comfortFlag[1] == '\0';
     if (embedded_requested) {
+        // One safe, numeric guest-side receipt proves the child inherited
+        // the requested debug profile. It does NOT claim sound is playing.
+        if (std::getenv("XXII_COMPAT_HLE_TRIAGE") != nullptr) {
+            std::fprintf(stderr,
+                         "XXII_DEBUG_RUNTIME_PROFILE audio_percent=%d no_activate=%d embedded=1\n",
+                         Common::DebugAudio::OutputPercent(), debug_no_activate ? 1 : 0);
+            std::fflush(stderr);
+        }
         SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1", SDL_HINT_OVERRIDE);
         std::fprintf(stderr, "XXII_GUEST_PAD_BACKGROUND enabled=%d\n",
                      SDL_GetHintBoolean(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, false) ? 1 : 0);
@@ -1005,7 +1017,37 @@ static void WindowCreate(WindowContext& context) {
         if (!embedded) {
             EXIT("XXII_EMBED_FAILED invalid parent or child HWND\n");
         }
-        SDL_ShowWindow(context.window);
+        // The child is hidden and reparented before first show. During that
+        // show, prevent SDL/Win32 from bringing a debugging game above other
+        // desktop windows. Restore its original focusability immediately so
+        // a deliberate user click can still focus keyboard-driven games.
+        const HWND embeddedWindow = static_cast<HWND>(SDL_GetPointerProperty(
+            SDL_GetWindowProperties(context.window),
+            SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+        LONG_PTR priorExtendedStyle = 0;
+        bool nonActivationStyleSet = false;
+        if (debug_no_activate && IsWindow(embeddedWindow)) {
+            priorExtendedStyle = GetWindowLongPtr(embeddedWindow, GWL_EXSTYLE);
+            SetLastError(0);
+            const LONG_PTR previous = SetWindowLongPtr(
+                embeddedWindow, GWL_EXSTYLE,
+                (priorExtendedStyle & ~WS_EX_TOPMOST) | WS_EX_NOACTIVATE);
+            nonActivationStyleSet = previous != 0 || GetLastError() == 0;
+        }
+        const bool shown = SDL_ShowWindow(context.window);
+        if (nonActivationStyleSet && IsWindow(embeddedWindow)) {
+            SetWindowLongPtr(embeddedWindow, GWL_EXSTYLE,
+                             priorExtendedStyle & ~WS_EX_TOPMOST);
+            const bool arranged = SetWindowPos(embeddedWindow, nullptr, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                SWP_NOACTIVATE | SWP_FRAMECHANGED) != 0;
+            if (shown && arranged) {
+                // This confirms the non-activating Win32 *request path*,
+                // not the foreground state of any third-party window.
+                std::fprintf(stderr, "XXII_DEBUG_WINDOW nonactivating_show=1 embedded=1\n");
+                std::fflush(stderr);
+            }
+        }
         int gamepad_count = 0;
         SDL_JoystickID* ids = SDL_GetGamepads(&gamepad_count);
         SDL_free(ids);

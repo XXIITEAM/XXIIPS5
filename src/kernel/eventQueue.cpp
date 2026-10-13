@@ -1,6 +1,7 @@
 #include "kernel/eventQueue.h"
 
 #include "common/assert.h"
+#include "common/diagnostics/hleTrace.h"
 #include "common/common.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
@@ -396,18 +397,22 @@ int KYTY_SYSV_ABI KernelDeleteEqueue(KernelEqueue eq) {
 
 int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int* out,
                                    const KernelUseconds* timo) {
+    Common::HleTrace::Span hle("wait_equeue", timo == nullptr ? "infinite" : "timed");
 	PRINT_NAME();
 
 	auto owner = KernelPinEqueue(eq);
 	if (!owner) {
+        hle.Finish(KERNEL_ERROR_EBADF);
 		return KERNEL_ERROR_EBADF;
 	}
 
 	if (ev == nullptr) {
+        hle.Finish(KERNEL_ERROR_EFAULT);
 		return KERNEL_ERROR_EFAULT;
 	}
 
 	if (num < 1) {
+        hle.Finish(KERNEL_ERROR_EINVAL);
 		return KERNEL_ERROR_EINVAL;
 	}
 
@@ -433,10 +438,12 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	}
 
 	if (*out == KERNEL_ERROR_EBADF) {
+        hle.Finish(KERNEL_ERROR_EBADF);
 		return KERNEL_ERROR_EBADF;
 	}
 	if (*out == 0) {
 		LOGF("\tEqueue wait timedout: %s\n", owner->GetName().c_str());
+        hle.Finish(KERNEL_ERROR_ETIMEDOUT);
 		return KERNEL_ERROR_ETIMEDOUT;
 	}
 
@@ -446,6 +453,7 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	     *out, static_cast<uint64_t>(ev[0].ident), ev[0].filter, ev[0].flags, ev[0].fflags,
 	     static_cast<uint64_t>(ev[0].data), reinterpret_cast<uint64_t>(ev[0].udata));
 
+    hle.Finish(OK);
 	return OK;
 }
 

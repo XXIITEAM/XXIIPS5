@@ -6,6 +6,7 @@
 #include "common/threads.h"
 #include "kernel/pthread.h"
 #include "libs/audio_internal.h"
+#include "common/diagnostics/debugAudio.h"
 #include "libs/controller.h"
 #include "libs/dualSenseHaptics.h"
 #include "libs/errno.h"
@@ -284,6 +285,26 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 		SDL_QuitSubSystem(SDL_INIT_AUDIO);
 		return false;
 	}
+    // The stream gain is installed BEFORE its first resume/queued samples:
+    // there is no short initial full-volume burst while Windows enumerates
+    // the audio session. It affects only this guest playback stream.
+    const float debugGain = Common::DebugAudio::OutputScale();
+    if (debugGain < 1.0f) {
+        if (!SDL_SetAudioStreamGain(port->stream, debugGain)) {
+            LOGF("PSVXXII debug audio gain failed; refusing uncontrolled playback: %s\n",
+                 SDL_GetError());
+            CloseSdlDevice(port);
+            return false;
+        }
+        // The parent may confirm that a live output device accepted the gain.
+        // No audio samples, device names or game metadata are sent.
+        static std::atomic<int> limitReports {0};
+        if (limitReports.fetch_add(1, std::memory_order_relaxed) < 4) {
+            std::fprintf(stderr, "XXII_DEBUG_AUDIO_LIMIT percent=%d applied=1 sink=sdl\n",
+                         Common::DebugAudio::OutputPercent());
+            std::fflush(stderr);
+        }
+    }
 	if (!SDL_ResumeAudioStreamDevice(port->stream)) {
 		LOGF("AudioOut: SDL_ResumeAudioStreamDevice failed: %s\n", SDL_GetError());
 		CloseSdlDevice(port);
@@ -471,6 +492,19 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 				    Controller::DualSenseHaptics::Open(freq, type == AUDIO_OUT_PORT_TYPE_PADSPK);
 			}
 
+            // A few numeric route markers distinguish an active SDL speaker
+            // from pad-speaker/haptics fallback. No audio/device names retained.
+            const char* probe = std::getenv("XXII_COMPAT_PROBE");
+            if (probe && probe[0] == '1' && probe[1] == '\0') {
+                static std::atomic<int> portReports {0};
+                if (portReports.fetch_add(1, std::memory_order_relaxed) < 8) {
+                    std::fprintf(stderr,
+                                 "XXII_DEBUG_AUDIO_ROUTE percent=%d type=%d sdl=%d haptics=%d\n",
+                                 Common::DebugAudio::OutputPercent(), type,
+                                 port.stream ? 1 : 0, port.haptics ? 1 : 0);
+                    std::fflush(stderr);
+                }
+            }
 			return Id::Create(id);
 		}
 	}
@@ -570,9 +604,23 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 			controller_queued_us = Controller::DualSenseHaptics::Queue(
 			    port.haptics, Controller::GetActiveControllerId(), params[i].data, port.samples_num,
 			    static_cast<uint32_t>(port.channels_num), FormatIsFloat(port.format), port.volume,
-			    gain, params[i].gains);
+                // Direct DualSense pad-speaker path bypasses the SDL stream;
+                // attenuate only speaker audio, never vibration/haptics.
+                port.type == AUDIO_OUT_PORT_TYPE_PADSPK
+                    ? gain * Common::DebugAudio::OutputScale() : gain,
+                params[i].gains);
 			controller_uses_bluetooth =
 			    Controller::DualSenseHaptics::UsesBluetooth(port.haptics);
+            if (controller_queued_us > 0 && port.type == AUDIO_OUT_PORT_TYPE_PADSPK &&
+                Common::DebugAudio::OutputPercent() < 100) {
+                static std::atomic<int> speakerReports {0};
+                if (speakerReports.fetch_add(1, std::memory_order_relaxed) < 2) {
+                    std::fprintf(stderr,
+                                 "XXII_DEBUG_AUDIO_LIMIT percent=%d applied=1 sink=dualsense\n",
+                                 Common::DebugAudio::OutputPercent());
+                    std::fflush(stderr);
+                }
+            }
 		}
 		if (controller_queued_us == 0) {
 			// No DualSense took it (e.g. it was unplugged); a pad speaker port plays on the main

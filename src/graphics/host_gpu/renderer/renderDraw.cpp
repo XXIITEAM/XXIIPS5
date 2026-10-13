@@ -16,6 +16,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/renderer/gpuIndexBounds.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
@@ -971,15 +972,40 @@ static PreparedIndexBuffer PrepareIndexBuffer(CommandBuffer&               buffe
 		return prepared;
 	}
 	prepared.type = source.type;
+	uint64_t native_capacity = 0;
 	if (source.host_data != nullptr) {
 		auto& stream = buffer.GetContext().GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
+		native_capacity = stream.Size();
+		if (source.size > native_capacity) {
+			std::fprintf(stderr,
+			             "XXII_GPU_INDEX_RANGE_INVALID native_capacity=%" PRIu64
+			             " offset=0 bytes=%" PRIu64 " reason=stream_capacity\n",
+			             native_capacity, source.size);
+			EXIT("guest index buffer is larger than native stream buffer\n");
+		}
 		prepared.offset = stream.Copy(source.host_data, source.size, 16);
 		prepared.buffer = stream.Handle();
 	} else {
 		auto [buffer_ptr, offset] =
 		    buffer.GetContext().GetBufferCache().ObtainBuffer(source.address, source.size, false);
+		EXIT_IF(buffer_ptr == nullptr);
+		native_capacity = buffer_ptr->Size();
 		prepared.buffer = buffer_ptr->Handle();
 		prepared.offset = offset;
+	}
+	const uint64_t index_alignment =
+	    source.type == vk::IndexType::eUint32 ? 4u : 2u;
+	if (!GpuTrace::FitsIndexBufferSpan(native_capacity, prepared.offset,
+	                                  source.size, index_alignment)) {
+		std::fprintf(stderr,
+		             "XXII_GPU_INDEX_RANGE_INVALID native_capacity=%" PRIu64
+		             " offset=%" PRIu64 " bytes=%" PRIu64
+		             " alignment=%" PRIu64 " type=%u tick=%" PRIu64 "\n",
+		             native_capacity, static_cast<uint64_t>(prepared.offset),
+		             source.size, index_alignment, static_cast<uint32_t>(source.type),
+		             buffer.GetContext().GetCommandScheduler().CurrentTick());
+		std::fflush(stderr);
+		EXIT("native index buffer range or alignment is invalid\n");
 	}
 	return prepared;
 }
@@ -1124,6 +1150,33 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (CopyDepthToColor(buffer, draw, emit, state)) {
 		return;
 	}
+    // Opt-in diagnostic only: isolate the entire preparation of one watched
+    // draw from other commands. This deliberately breaks rendering and must
+    // never be used as a compatibility fix.
+    static const uint32_t omit_prep_fp = [] {
+        const char* probe = std::getenv("XXII_COMPAT_PROBE");
+        if (!probe || probe[0] != '1' || probe[1] != '\0') return uint32_t {0};
+        const char* value = std::getenv("XXII_COMPAT_SKIP_PREP_FP");
+        if (!value || !*value) return uint32_t {0};
+        char* end = nullptr;
+        const auto number = std::strtoul(value, &end, 10);
+        return end != value && *end == '\0' && number <= UINT32_MAX
+                   ? static_cast<uint32_t>(number) : uint32_t {0};
+    }();
+    if (omit_prep_fp && draw.IsIndexed() && draw.index_count == 600 &&
+        m_context.GetCommandScheduler().CurrentTick() >= 28500 &&
+        DrawShaderFingerprint(state) == omit_prep_fp) {
+        static std::atomic_uint omitted {0};
+        const auto count = omitted.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (count <= 8 || count % 64 == 0) {
+            std::fprintf(stderr, "XXII_DIAG_DRAW_PREP_OMITTED count=%u tick=%" PRIu64
+                                 " index_count=%u fp=%u\n", count,
+                         m_context.GetCommandScheduler().CurrentTick(),
+                         draw.index_count, omit_prep_fp);
+            std::fflush(stderr);
+        }
+        return;
+    }
 	const auto vertex_stages =
 	    std::span {state.vertex_info.data(), state.programs.VertexStageCount()};
 	const bool mesh_active = state.vertex_info[0].stage.program->stage == ShaderType::Mesh;
@@ -1212,8 +1265,64 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
         return end != text && *end == '\0' && parsed <= UINT32_MAX
                    ? static_cast<uint32_t>(parsed) : uint32_t {0};
     }();
+    // A draw count is an independent diagnostic watch key: last-tagged CPU
+    // draws do not necessarily match the Vulkan draw still executing on GPU.
+    static const uint32_t watched_index_count = [] {
+        const char* probe = std::getenv("XXII_COMPAT_PROBE");
+        if (!probe || probe[0] != '1' || probe[1] != '\0') return uint32_t {0};
+        const char* raw = std::getenv("XXII_COMPAT_WATCH_INDEX_COUNT");
+        if (!raw || !*raw) return uint32_t {0};
+        char* end = nullptr;
+        const auto count = std::strtoul(raw, &end, 10);
+        return end != raw && *end == '\0' && count <= UINT32_MAX
+                   ? static_cast<uint32_t>(count) : uint32_t {0};
+    }();
+    const bool watched_count_match =
+        watched_index_count && draw.IsIndexed() && draw.index_count == watched_index_count &&
+        m_context.GetCommandScheduler().CurrentTick() >= 28500;
+    if (watched_count_match) {
+        static std::atomic_uint watch_hits {0};
+        const unsigned n = watch_hits.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 16 || n % 128 == 0) {
+            const auto* vs = state.vertex_info[0].stage.program;
+            const auto* fs = state.ps_active ? state.ps_input_info.stage.program : nullptr;
+            std::fprintf(stderr,
+                         "XXII_INDEX_WATCH hit=%u tick=%" PRIu64
+                         " indices=%u fingerprint=%u vs=0x%016" PRIx64
+                         " fs=0x%016" PRIx64 " colors=%u depth=%d\n",
+                         n, m_context.GetCommandScheduler().CurrentTick(),
+                         draw.index_count, shader_fingerprint,
+                         vs ? vs->shader_hash : uint64_t {0},
+                         fs ? fs->shader_hash : uint64_t {0},
+                         state.color_count, state.depth_info.image_id ? 1 : 0);
+            std::fflush(stderr);
+        }
+    }
+
+    // GPU execution-stage markers inside the watched draw. Multiple markers
+    // distinguish resource binding, dynamic rendering and primitive execution.
+    // They are diagnostic-only, and are never added to normal game sessions.
+    const auto draw_checkpoint = [&](uint32_t phase) {
+        const bool watched_by_fp = watched_fingerprint && draw.IsIndexed() &&
+            draw.index_count == 600 && shader_fingerprint == watched_fingerprint;
+        if (!(watched_by_fp || watched_count_match) ||
+            !m_context.GetGraphics().device_checkpoints_enabled) return;
+        const auto& graphics = m_context.GetGraphics();
+        const auto insert = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(
+                static_cast<VkDevice>(graphics.device), "vkCmdSetCheckpointNV"));
+        if (!insert) return;
+        // Keep the opaque marker in canonical low address space; it is NOT
+        // dereferenced and carries no guest or host address.
+        constexpr uint64_t DrawTag = UINT64_C(1) << 43;
+        constexpr uint64_t SubmitMask = (UINT64_C(1) << 39) - 1;
+        const uint64_t marker = DrawTag | ((submit_id & SubmitMask) << 4) | (phase & 0xf);
+        insert(static_cast<VkCommandBuffer>(vk_buffer),
+               reinterpret_cast<const void*>(static_cast<uintptr_t>(marker)));
+    };
     static std::atomic_bool reported_fingerprint {false};
-    if (watched_fingerprint != 0 && shader_fingerprint == watched_fingerprint &&
+    if (((watched_fingerprint != 0 && shader_fingerprint == watched_fingerprint) ||
+         watched_count_match) &&
         !reported_fingerprint.exchange(true, std::memory_order_relaxed)) {
         std::fprintf(stderr, "XXII_SHADER_META kind=draw fp=%u index_count=%u"
                              " colors=%u pixel_active=%d vertex_stages=%u"
@@ -1291,13 +1400,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
     }
 	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u,
                       shader_fingerprint);
+    draw_checkpoint(0); // before resource/buffer commands
 	if (!mesh_active) {
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
 	}
+    draw_checkpoint(1); // vertex buffer commands recorded
 	if (state.ps_active && !draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u, shader_fingerprint);
 	}
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+    draw_checkpoint(2); // descriptor commands recorded
 	if (mesh_active) {
 		const uint32_t draw_data[] {
 		    draw.index_count,
@@ -1312,49 +1424,73 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                        0, sizeof(draw_data), draw_data);
 	} else {
 		CommitIndexBuffer(vk_buffer, index_binding);
+		if (index_binding.buffer != nullptr)
+			buffer.RecordGpuTrace(GpuTrace::Kind::IndexBuffer,
+			                      draw.index_count,
+			                      static_cast<uint32_t>(index_binding.type),
+			                      static_cast<uint32_t>(index_source.size),
+			                      index_binding.offset);
 	}
+    draw_checkpoint(3); // index buffer bound
 
 	auto& dynamic_state = m_context.GetCommandScheduler().GetDynamicState();
 	UpdateGraphicsDynamicState(buffer, dynamic_state, vertex_stages.back(), state.depth_info,
 	                           rendering);
 	dynamic_state.SetAttachmentFeedbackLoopAspects(feedback_aspects);
 	dynamic_state.Commit(m_context.GetGraphics(), vk_buffer);
+    draw_checkpoint(4); // dynamic state before rendering
 
 	LogDrawPhase(draw.Name(), "BeginRendering");
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u, shader_fingerprint);
 	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
+    draw_checkpoint(5); // rendering begun
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
-    // Two GPU *execution* checkpoints bracketing the recurring 600-index
-    // Syberia draw. Only one watched fingerprint, on an opt-in diagnostics
-    // device with VK_NV_device_diagnostic_checkpoints; no draw is skipped.
-    // The high A5 tag distinguishes these from scheduler-tail markers.
-    const auto draw_checkpoint = [&](uint64_t phase) {
-        if (!draw.IsIndexed() || draw.index_count != 600 ||
-            watched_fingerprint == 0 || shader_fingerprint != watched_fingerprint ||
-            !m_context.GetGraphics().device_checkpoints_enabled) return;
-        const auto& graphics = m_context.GetGraphics();
-        const auto insert = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
-            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(
-                static_cast<VkDevice>(graphics.device), "vkCmdSetCheckpointNV"));
-        if (!insert) return;
-        constexpr uint64_t DrawTag = UINT64_C(0xA500000000000000);
-        constexpr uint64_t SubmitMask = (UINT64_C(1) << 55) - 1;
-        const uint64_t marker = DrawTag | ((submit_id & SubmitMask) << 1) | phase;
-        insert(static_cast<VkCommandBuffer>(vk_buffer),
-               reinterpret_cast<const void*>(static_cast<uintptr_t>(marker)));
-    };
+	buffer.RecordGpuTrace(GpuTrace::Kind::GraphicsPipeline, shader_fingerprint,
+	                      state.color_count, state.depth_info.image_id ? 1u : 0u);
+	if (const auto* vs = state.vertex_info[0].stage.program)
+		buffer.RecordGpuTrace(GpuTrace::Kind::VertexShader, 0, 0, 0, vs->shader_hash);
+	if (state.ps_active && state.ps_input_info.stage.program)
+		buffer.RecordGpuTrace(GpuTrace::Kind::PixelShader, 0, 0, 0,
+		                      state.ps_input_info.stage.program->shader_hash);
+    // Zero-copy, opt-in footprint of the draw's bound shader resources.
+    // Four resource counts and flags are sufficient to compare working
+    // and unconfirmed GPU buffers without dumping proprietary shader data.
+    const auto* trace_vs = state.vertex_info[0].stage.program;
+    const auto* trace_ps = state.ps_active ? state.ps_input_info.stage.program : nullptr;
+    if (trace_vs != nullptr) {
+        const uint64_t risk_flags = (trace_vs->has_address_writes ? 1u : 0u) |
+                                    (trace_ps && trace_ps->has_address_writes ? 2u : 0u) |
+                                    (trace_vs->info.uses_dma ? 4u : 0u) |
+                                    (trace_ps && trace_ps->info.uses_dma ? 8u : 0u);
+        buffer.RecordGpuTrace(
+            GpuTrace::Kind::ShaderResourceShape,
+            static_cast<uint32_t>(trace_vs->info.buffers.size()),
+            static_cast<uint32_t>(trace_vs->info.images.size()),
+            trace_ps ? static_cast<uint32_t>(trace_ps->info.buffers.size()) : 0u,
+            trace_ps ? static_cast<uint64_t>(trace_ps->info.images.size()) : 0u,
+            risk_flags);
+    }
+    draw_checkpoint(6); // pipeline bound
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u, shader_fingerprint);
 	}
-    draw_checkpoint(0); // checkpoint immediately before the actual indexed draw
+    draw_checkpoint(7); // before the primitive
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
+		buffer.RecordGpuTrace(GpuTrace::Kind::DrawMesh, mesh_groups,
+		                      draw.instance_count, 1, shader_fingerprint);
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
+		buffer.RecordGpuTrace(draw.IsIndexed() ? GpuTrace::Kind::DrawIndexed
+		                                      : GpuTrace::Kind::Draw,
+		                      draw.index_count, draw.instance_count,
+		                      static_cast<uint32_t>(ucfg.GetPrimType()),
+		                      shader_fingerprint,
+		                      static_cast<uint32_t>(emit.vertex_offset));
 	}
-    draw_checkpoint(1); // checkpoint immediately after the draw command
+    draw_checkpoint(8); // after the primitive
 
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u, shader_fingerprint);
@@ -1373,6 +1509,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		ShaderWriteBarrier(vk_buffer, shader_write_stages);
 	}
 	LogDrawPhase(draw.Name(), "DrawComplete");
+    draw_checkpoint(9); // draw + buffer-write barrier complete
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u, shader_fingerprint);
 	}
@@ -1384,6 +1521,39 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
+    // Diagnostic only. Skip one explicitly selected indexed-draw count before
+    // recording Vulkan work. Never enabled in normal sessions; this deliberately
+    // damages rendering and MUST NOT be used as a compatibility fix.
+    static const uint32_t early_omit_count = [] {
+        const char* probe = std::getenv("XXII_COMPAT_PROBE");
+        if (!probe || probe[0] != '1' || probe[1] != '\0') return uint32_t {0};
+        const char* selected = std::getenv("XXII_COMPAT_SKIP_INDEX_COUNT");
+        if (selected && *selected) {
+            char* end = nullptr;
+            const auto count = std::strtoul(selected, &end, 10);
+            if (end != selected && *end == '\0' && count >= 3 && count <= 65536)
+                return static_cast<uint32_t>(count);
+            return uint32_t {0};
+        }
+        const char* legacy = std::getenv("XXII_COMPAT_SKIP_ALL_INDEX600");
+        return legacy && legacy[0] == '1' && legacy[1] == '\0'
+                   ? uint32_t {600} : uint32_t {0};
+    }();
+    // An explicit indexed-count isolation starts from the first draw.
+    // The legacy 600-index experiment retains its original late threshold.
+    const bool skip_from_start = std::getenv("XXII_COMPAT_SKIP_INDEX_COUNT") != nullptr;
+    if (early_omit_count && args.index_count == early_omit_count &&
+        (skip_from_start || m_context.GetCommandScheduler().CurrentTick() >= 28500)) {
+        static std::atomic_uint count {0};
+        const auto n = count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8 || n % 64 == 0) {
+            std::fprintf(stderr, "XXII_DIAG_EARLY_INDEX_OMIT count=%u tick=%" PRIu64
+                                 " indices=%u\n", n,
+                         m_context.GetCommandScheduler().CurrentTick(), args.index_count);
+            std::fflush(stderr);
+        }
+        return;
+    }
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
@@ -1551,6 +1721,56 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		return;
 	}
 
+	// Probe the recurring Unity fullscreen DrawAuto pipeline independently of
+	// the scheduler's last debug breadcrumb. No output or behavior in normal runs.
+	static const uint32_t auto_watch = [] {
+		const char* probe = std::getenv("XXII_COMPAT_PROBE");
+		const char* raw = std::getenv("XXII_COMPAT_DRAW_FINGERPRINT");
+		if (!probe || probe[0] != '1' || probe[1] != '\0' || !raw || !*raw)
+			return uint32_t {0};
+		char* end = nullptr;
+		const auto parsed = std::strtoul(raw, &end, 10);
+		return end != raw && *end == '\0' && parsed <= UINT32_MAX
+		           ? static_cast<uint32_t>(parsed) : uint32_t {0};
+	}();
+	const uint32_t auto_fp = DrawShaderFingerprint(state);
+	if (auto_watch && auto_fp == auto_watch) {
+		static std::atomic_uint watches {0};
+		const uint32_t hit = watches.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (hit <= 8 || (hit % 128) == 0) {
+			const auto* vs = state.vertex_info[0].stage.program;
+			const auto* fs = state.ps_active ? state.ps_input_info.stage.program : nullptr;
+			std::fprintf(stderr, "XXII_AUTO_WATCH hit=%u tick=%" PRIu64
+			             " fp=%u vertices=%u vs=0x%016" PRIx64 " fs=0x%016" PRIx64
+			             " colors=%u depth=%d\n",
+			             hit, m_context.GetCommandScheduler().CurrentTick(), auto_fp,
+			             args.vertex_count, vs ? vs->shader_hash : uint64_t {0},
+			             fs ? fs->shader_hash : uint64_t {0},
+			             state.color_count, state.depth_info.image_id ? 1 : 0);
+			std::fflush(stderr);
+		}
+	}
+	static const uint32_t skip_auto_fp = [] {
+		const char* probe = std::getenv("XXII_COMPAT_PROBE");
+		const char* raw = std::getenv("XXII_COMPAT_SKIP_AUTO_FP");
+		if (!probe || probe[0] != '1' || probe[1] != '\0' || !raw || !*raw)
+			return uint32_t {0};
+		char* end = nullptr;
+		const auto parsed = std::strtoul(raw, &end, 10);
+		return end != raw && *end == '\0' && parsed <= UINT32_MAX
+		           ? static_cast<uint32_t>(parsed) : uint32_t {0};
+	}();
+	if (skip_auto_fp && auto_fp == skip_auto_fp) {
+		static std::atomic_uint omitted {0};
+		const uint32_t count = omitted.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (count <= 8 || (count % 128) == 0) {
+			std::fprintf(stderr, "XXII_DIAG_AUTO_SKIPPED count=%u fp=%u\n",
+			             count, auto_fp);
+			std::fflush(stderr);
+		}
+		ResetBindings();
+		return;
+	}
 	const bool rect_list = Prospero::IsRectList(ucfg.GetPrimType());
 	if (rect_list && state.vertex_info[0].buffers_num == 0 &&
 	    state.vertex_info[0].stage.program->param_export_mask == 0 &&

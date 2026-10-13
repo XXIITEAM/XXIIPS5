@@ -1,5 +1,6 @@
 #include "common/abi.h"
 #include "common/assert.h"
+#include "common/diagnostics/hleTrace.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -230,7 +231,10 @@ static void* KYTY_SYSV_ABI KernelApplicationHeapGetMem(uint64_t alignment, uint6
 int KYTY_SYSV_ABI KernelDlsym(KernelModule handle, const char* symbol, void** addr) {
 	static std::atomic_uint32_t log_count = 0;
 	const auto                  index     = log_count.fetch_add(1, std::memory_order_relaxed);
-	if (index < 32 || (index % 600) == 0) {
+    // When incident capture is armed, sampled structured metadata replaces
+    // verbose raw dlsym text. Normal non-capture behavior remains unchanged.
+    const bool structuredCapture = Common::HleTrace::Enabled();
+    if (!structuredCapture && (index < 32 || (index % 600) == 0)) {
 		PRINT_NAME();
 		LOGF("\t call_count = %" PRIu32 ", handle = %" PRId32 ", symbol = %s\n", index + 1, handle,
 		     symbol != nullptr ? symbol : "(null)");
@@ -249,15 +253,18 @@ int KYTY_SYSV_ABI KernelDlsym(KernelModule handle, const char* symbol, void** ad
 	auto* program = rt->FindProgramById(handle);
 	if (program == nullptr || program->export_symbols == nullptr) {
 		*addr = nullptr;
-		LOGF("\t unresolved dlsym: handle = %" PRId32 ", symbol = %s, reason = module not found\n",
-		     handle, symbol);
+        Common::HleTrace::DynamicSymbolFailure(symbol, handle, "missing_module");
+        if (!structuredCapture) {
+		    LOGF("\t unresolved dlsym: handle = %" PRId32 ", symbol = %s, reason = module not found\n",
+		         handle, symbol);
+        }
 		return KERNEL_ERROR_ESRCH;
 	}
 
 	const auto* record = kernel_find_export_symbol(program->export_symbols.get(), symbol);
 	if (record != nullptr) {
 		*addr = reinterpret_cast<void*>(record->vaddr);
-		if (index < 32 || (index % 600) == 0) {
+		if (!structuredCapture && (index < 32 || (index % 600) == 0)) {
 			LOGF("\t resolved = 0x%016" PRIx64 " (%s)\n", record->vaddr, record->name.c_str());
 		}
 		return OK;
@@ -265,7 +272,7 @@ int KYTY_SYSV_ABI KernelDlsym(KernelModule handle, const char* symbol, void** ad
 
 	if (handle == 0 && std::strcmp(symbol, "scriptingGetMem") == 0) {
 		*addr = reinterpret_cast<void*>(&KernelApplicationHeapGetMem);
-		if (index < 32 || (index % 600) == 0) {
+		if (!structuredCapture && (index < 32 || (index % 600) == 0)) {
 			LOGF("\t resolved = 0x%016" PRIx64 " (application heap scriptingGetMem)\n",
 			     reinterpret_cast<uint64_t>(*addr));
 		}
@@ -273,8 +280,11 @@ int KYTY_SYSV_ABI KernelDlsym(KernelModule handle, const char* symbol, void** ad
 	}
 
 	*addr = nullptr;
-	LOGF("\t unresolved dlsym: handle = %" PRId32 ", module = %s, symbol = %s\n", handle,
-	     Common::PathToString(program->file_name).c_str(), symbol);
+    Common::HleTrace::DynamicSymbolFailure(symbol, handle, "symbol_missing");
+    if (!structuredCapture) {
+	    LOGF("\t unresolved dlsym: handle = %" PRId32 ", module = %s, symbol = %s\n", handle,
+	         Common::PathToString(program->file_name).c_str(), symbol);
+    }
 	return KERNEL_ERROR_ESRCH;
 }
 
@@ -2102,24 +2112,36 @@ static void LogExperimentalSyncOnAddress(std::atomic_bool& logged, const char* f
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWait(volatile uint32_t* address, uint32_t expected,
                                           const uint32_t* timeout_micros) {
-	return LibKernel::SyncOnAddress::Wait32(address, expected, timeout_micros,
-	                                        LibKernel::KernelDispatchPendingSignalForCurrentThread);
+    Common::HleTrace::Span hle("sync_wait32", timeout_micros ? "timed" : "infinite");
+    const int result = LibKernel::SyncOnAddress::Wait32(
+        address, expected, timeout_micros,
+        LibKernel::KernelDispatchPendingSignalForCurrentThread);
+    hle.Finish(result);
+    return result;
 }
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWait32(volatile uint32_t* address, uint32_t expected,
                                             const uint32_t* timeout_micros) {
 	static std::atomic_bool logged {false};
 	LogExperimentalSyncOnAddress(logged, "sceKernelSyncOnAddressWait32");
-	return LibKernel::SyncOnAddress::Wait32(address, expected, timeout_micros,
-	                                        LibKernel::KernelDispatchPendingSignalForCurrentThread);
+    Common::HleTrace::Span hle("sync_wait32", timeout_micros ? "timed" : "infinite");
+    const int result = LibKernel::SyncOnAddress::Wait32(
+        address, expected, timeout_micros,
+        LibKernel::KernelDispatchPendingSignalForCurrentThread);
+    hle.Finish(result);
+    return result;
 }
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWait64(volatile uint64_t* address, uint64_t expected,
                                             const uint32_t* timeout_micros) {
 	static std::atomic_bool logged {false};
 	LogExperimentalSyncOnAddress(logged, "sceKernelSyncOnAddressWait64");
-	return LibKernel::SyncOnAddress::Wait64(address, expected, timeout_micros,
-	                                        LibKernel::KernelDispatchPendingSignalForCurrentThread);
+    Common::HleTrace::Span hle("sync_wait64", timeout_micros ? "timed" : "infinite");
+    const int result = LibKernel::SyncOnAddress::Wait64(
+        address, expected, timeout_micros,
+        LibKernel::KernelDispatchPendingSignalForCurrentThread);
+    hle.Finish(result);
+    return result;
 }
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWake(volatile void* address, int32_t count) {

@@ -493,6 +493,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		image_atomic_int64.pNext = supported_features2.pNext;
 		supported_features2.pNext = &image_atomic_int64;
 	}
+    const bool nv_diag_extension =
+        HasExtension(device_extensions, VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
+    vk::PhysicalDeviceDiagnosticsConfigFeaturesNV supported_nv_diag {};
+    if (nv_diag_extension) {
+        supported_nv_diag.pNext = supported_features2.pNext;
+        supported_features2.pNext = &supported_nv_diag;
+    }
     // Device-fault diagnostics are opt-in and must not alter ordinary games.
     const bool fault_extension = HasExtension(device_extensions, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     vk::PhysicalDeviceFaultFeaturesEXT supported_fault {};
@@ -672,6 +679,31 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
         enable_fault.deviceFaultVendorBinary = VK_FALSE;
         enable_fault.pNext = const_cast<void*>(create_info.pNext);
         create_info.pNext = &enable_fault;
+    }
+    // Vulkan's NV diagnostic mode is not a game workaround. It only enables
+    // additional driver-side evidence after the explicit private probe opt-in.
+    vk::PhysicalDeviceDiagnosticsConfigFeaturesNV enable_nv_diag {};
+    vk::DeviceDiagnosticsConfigCreateInfoNV nv_diag_create {};
+    if (nv_diag_extension && supported_nv_diag.diagnosticsConfig == VK_TRUE) {
+        enable_nv_diag.diagnosticsConfig = VK_TRUE;
+        enable_nv_diag.pNext = const_cast<void*>(create_info.pNext);
+        create_info.pNext = &enable_nv_diag;
+
+        nv_diag_create.flags = vk::DeviceDiagnosticsConfigFlagBitsNV::eEnableShaderErrorReporting |
+                               vk::DeviceDiagnosticsConfigFlagBitsNV::eEnableResourceTracking;
+        const char* nv_mode = std::getenv("XXII_COMPAT_NV_DIAGNOSTICS");
+        if (nv_mode && nv_mode[0] == '2' && nv_mode[1] == '\0') {
+            nv_diag_create.flags |= vk::DeviceDiagnosticsConfigFlagBitsNV::eEnableShaderDebugInfo;
+        }
+        nv_diag_create.pNext = create_info.pNext;
+        create_info.pNext = &nv_diag_create;
+    }
+    if (std::getenv("XXII_COMPAT_PROBE") && nv_diag_extension) {
+        std::fprintf(stderr, "XXII_NV_DIAGNOSTICS feature=%d active=%d flags=%u\n",
+                     supported_nv_diag.diagnosticsConfig == VK_TRUE ? 1 : 0,
+                     create_info.pNext == &nv_diag_create ? 1 : 0,
+                     static_cast<uint32_t>(nv_diag_create.flags));
+        std::fflush(stderr);
     }
 	create_info.pQueueCreateInfos       = &queue_create_info;
 	create_info.queueCreateInfoCount    = 1;
@@ -1078,6 +1110,22 @@ void WindowContext::CreateVulkan() {
             HasExtension(available_extensions, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
         if (graphic_ctx.device_checkpoints_enabled) {
             device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        }
+        // Request additional NVIDIA crash telemetry only in explicitly
+        // selected, private compatibility probes. Do not affect production.
+        const char* nv_diag_mode = std::getenv("XXII_COMPAT_NV_DIAGNOSTICS");
+        const bool nv_diag_requested = probe && strcmp(probe, "1") == 0 &&
+            nv_diag_mode && (strcmp(nv_diag_mode, "1") == 0 ||
+                             strcmp(nv_diag_mode, "2") == 0);
+        const bool nv_diag_available =
+            HasExtension(available_extensions, VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
+        if (nv_diag_requested && nv_diag_available) {
+            device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
+        }
+        if (nv_diag_requested) {
+            std::fprintf(stderr, "XXII_NV_DIAGNOSTICS_REQUEST available=%d\n",
+                         nv_diag_available ? 1 : 0);
+            std::fflush(stderr);
         }
         if (probe) {
             std::fprintf(stderr, "XXII_GPU_CHECKPOINT_SUPPORT enabled=%d\n",

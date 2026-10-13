@@ -19,6 +19,7 @@
 #include "graphics/shader/shader.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <bit>
 #include <limits>
 #include <span>
@@ -546,6 +547,20 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	if (graphics_debug_dump_enabled()) {
 		LOGF("PipelineTrace: vkCreateGraphicsPipelines done result=%s pipeline=%p\n",
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
+	}
+	if (result != vk::Result::eSuccess) {
+		// A pipeline driver failure must expose its VkResult before the fatal exit.
+		std::fprintf(stderr,
+		             "XXII_GPU_PIPELINE_CREATE_FAILURE result=%s code=%d vs=%" PRIu64
+		             " ps=%" PRIu64 " stages=%u topology=%u colors=%u depth=%u stencil=%u"
+		             " vertex_bindings=%u attrs=%u\n",
+		             vk::to_string(result).c_str(), static_cast<int>(result),
+		             vertex_program.id, ps_active ? pixel_program.id : 0,
+		             shader_stage_count, static_cast<unsigned>(static_params.topology),
+		             rendering.color_count, static_cast<unsigned>(rendering.depth_format),
+		             static_cast<unsigned>(rendering.stencil_format),
+		             vertex_input.binding_count, vertex_input.attribute_count);
+		std::fflush(stderr);
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 

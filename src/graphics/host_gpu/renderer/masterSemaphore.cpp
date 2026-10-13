@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <memory>
 
 namespace Libs::Graphics {
 
@@ -46,12 +47,33 @@ void ReportSemaphoreError(const char* operation, vk::Result result, uint64_t wan
                  operation, name.c_str(), static_cast<int>(result),
                  wanted, submitted, completed);
     std::fflush(stderr);
+    // Persist the real Vulkan error alongside the flight command trace.
+    // Frontend queues are bounded and may omit the terminal error.
+    const char* probe = std::getenv("XXII_COMPAT_PROBE");
+    const char* report_path = std::getenv("XXII_COMPAT_GPU_FLIGHT_LOG");
+    if (probe && probe[0] == '1' && probe[1] == '\0' &&
+        report_path && *report_path != '\0') {
+        if (FILE* report = std::fopen(report_path, "ab")) {
+            std::fprintf(report,
+                         "XXII_GPU_FLIGHT_VULKAN_ERROR operation=%s result=%s code=%d"
+                         " wanted=%" PRIu64 " submitted=%" PRIu64 " completed=%" PRIu64 "\n",
+                         operation, name.c_str(), static_cast<int>(result),
+                         wanted, submitted, completed);
+            std::fclose(report);
+        }
+    }
 }
 } // namespace
 
 MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics) {
     const char* probe = std::getenv("XXII_COMPAT_PROBE");
     m_traceEnabled = probe && probe[0] == '1' && probe[1] == '\0';
+    const char* flight = std::getenv("XXII_COMPAT_GPU_FLIGHT_RECORDER");
+    if (m_traceEnabled && flight && flight[0] == '1' && flight[1] == '\0')
+        m_flight_recorder = std::make_unique<GpuTrace::FlightRecorder>();
+    const char* resource_trace = std::getenv("XXII_COMPAT_GPU_RESOURCE_LIFETIME");
+    m_resource_trace_enabled = m_traceEnabled && resource_trace &&
+        resource_trace[0] == '1' && resource_trace[1] == '\0';
     if (m_traceEnabled) {
         std::fprintf(stderr, "XXII_GPU_BREADCRUMB_INIT capacity=%zu\n", TraceCapacity);
         std::fflush(stderr);
@@ -73,13 +95,35 @@ MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics)
 void MasterSemaphore::RecordSubmission(uint64_t tick, uint32_t operation,
                                        uint64_t submitId, uint32_t a, uint32_t b,
                                        uint32_t c, uint32_t d, uint64_t e,
-                                       uint64_t checkpoint_marker) {
+                                       uint64_t checkpoint_marker,
+                                       const GpuTrace::CommandTrace& commands) {
     if (!m_traceEnabled) return;
+    // Observe device-memory pressure without changing queue submission behavior.
+    // Sample once per 2048 completed CPU-side submissions; private probe only.
+    const char* memory_trace = std::getenv("XXII_COMPAT_GPU_MEMORY_TRACE");
+    if (memory_trace && memory_trace[0] == '1' && memory_trace[1] == '\0' &&
+        (tick % 2048u) == 0) {
+        m_graphics.LogMemoryBudget();
+    }
     std::lock_guard guard(m_traceMutex);
     m_trace[m_traceHead] = {tick, operation, submitId, a, b, c, d, e,
                             checkpoint_marker};
     m_traceHead = (m_traceHead + 1) % TraceCapacity;
     m_traceCount = std::min(m_traceCount + 1, TraceCapacity);
+    if (m_flight_recorder && commands.Total() != 0)
+        m_flight_recorder->Add(tick, commands);
+}
+
+void MasterSemaphore::RecordResourceEvent(GpuTrace::ResourceAction action, uint64_t tick,
+                                         uint64_t retire_tick, uint32_t slot,
+                                         uint32_t generation, uint32_t format,
+                                         uint32_t flags, uint64_t bytes) {
+    if (!m_resource_trace_enabled) return;
+    const GpuTrace::ResourceEvent event {
+        action, tick, KnownGpuTick(), retire_tick, bytes, slot, generation, format, flags
+    };
+    std::lock_guard guard(m_traceMutex);
+    m_resource_history.Push(event);
 }
 
 void MasterSemaphore::DumpDeviceFault() const {
@@ -172,15 +216,41 @@ void MasterSemaphore::DumpCheckpoints() const {
     for (uint32_t i = 0; i < count; ++i) {
         const uint64_t marker = static_cast<uint64_t>(
             reinterpret_cast<uintptr_t>(checkpoints[i].pCheckpointMarker));
-        constexpr uint64_t DrawTag = UINT64_C(0xA500000000000000);
-        constexpr uint64_t SubmitMask = (UINT64_C(1) << 55) - 1;
-        if ((marker & UINT64_C(0xFF00000000000000)) == DrawTag) {
+        constexpr uint64_t DrawPhaseTag = UINT64_C(1) << 43;
+        constexpr uint64_t SubmitMask = (UINT64_C(1) << 39) - 1;
+        constexpr std::array<const char*, 10> phase_names {
+            "before_bindings", "vertex_buffers", "descriptors", "index_buffer",
+            "dynamic_state", "begin_rendering", "pipeline_bound",
+            "before_primitive", "after_primitive", "draw_complete"
+        };
+        if ((marker & DrawPhaseTag) != 0 &&
+            (marker & UINT64_C(0xFFFF000000000000)) == 0) {
+            const uint32_t phase = static_cast<uint32_t>(marker & 15);
             std::fprintf(stderr,
                          "XXII_GPU_CHECKPOINT stage=%u marker=%" PRIu64
-                         " kind=watched_indexed_draw phase=%s submit=%" PRIu64 "\n",
+                         " kind=watched_draw_phase phase=%u name=%s submit=%" PRIu64 "\n",
+                         static_cast<unsigned>(checkpoints[i].stage), marker, phase,
+                         phase < phase_names.size() ? phase_names[phase] : "unknown",
+                         (marker >> 4) & SubmitMask);
+        } else if ((marker & (UINT64_C(1) << 42)) != 0 &&
+                   (marker & DrawPhaseTag) == 0) {
+            constexpr uint64_t BeginTag = UINT64_C(1) << 42;
+            std::fprintf(stderr,
+                         "XXII_GPU_CHECKPOINT stage=%u marker=%" PRIu64
+                         " kind=command_buffer_begin tick=%" PRIu64 "\n",
                          static_cast<unsigned>(checkpoints[i].stage), marker,
-                         (marker & 1) ? "after" : "before",
-                         (marker >> 1) & SubmitMask);
+                         marker & (BeginTag - 1));
+        } else if ((marker & (UINT64_C(1) << 41)) != 0 &&
+                   (marker & ((UINT64_C(1) << 42) | DrawPhaseTag)) == 0) {
+            constexpr uint64_t SubmitMask = (UINT64_C(1) << 23) - 1;
+            constexpr uint64_t ArgMask = (UINT64_C(1) << 12) - 1;
+            std::fprintf(stderr,
+                         "XXII_GPU_CHECKPOINT stage=%u marker=%" PRIu64
+                         " kind=guest_op_tag operation=%u arg0=%u submit_low23=%" PRIu64 "\n",
+                         static_cast<unsigned>(checkpoints[i].stage), marker,
+                         static_cast<unsigned>(marker & 63),
+                         static_cast<unsigned>((marker >> 6) & ArgMask),
+                         (marker >> 18) & SubmitMask);
         } else {
             std::fprintf(stderr,
                          "XXII_GPU_CHECKPOINT stage=%u marker=%" PRIu64
@@ -191,13 +261,43 @@ void MasterSemaphore::DumpCheckpoints() const {
     std::fflush(stderr);
 }
 
+void MasterSemaphore::SampleFlightRecorder(uint64_t submitted_tick) const {
+    // Submitted commands form reference snapshots, even during startup:
+    // observe without a GPU wait; initial powers of 2, then every 2048 submits.
+    if (!m_flight_recorder || !GpuTrace::ShouldSampleTick(submitted_tick)) return;
+    const char* report_path = std::getenv("XXII_COMPAT_GPU_FLIGHT_LOG");
+    if (!report_path || !*report_path) return;
+    auto snapshot = std::make_unique<GpuTrace::FlightRecorder>();
+    GpuTrace::ResourceLifetimeHistory resource_snapshot;
+    {
+        std::lock_guard guard(m_traceMutex);
+        *snapshot = *m_flight_recorder;
+        if (m_resource_trace_enabled) resource_snapshot = m_resource_history;
+    }
+    if (FILE* report = std::fopen(report_path, "ab")) {
+        std::fprintf(report,
+                     "XXII_GPU_FLIGHT_HEALTHY_SAMPLE submitted=%" PRIu64
+                     " known_completed=%" PRIu64 "\n",
+                     submitted_tick, KnownGpuTick());
+        snapshot->Dump(report, KnownGpuTick(), false);
+        if (m_resource_trace_enabled) resource_snapshot.Dump(report, false);
+        std::fclose(report);
+    }
+}
+
 void MasterSemaphore::DumpRecentSubmissions() const {
     if (!m_traceEnabled) return;
     std::array<SubmittedOperation, TraceCapacity> snapshot {};
+    auto flight_snapshot = m_flight_recorder
+                               ? std::make_unique<GpuTrace::FlightRecorder>()
+                               : nullptr;
+    GpuTrace::ResourceLifetimeHistory resource_snapshot;
     size_t count = 0;
     {
         std::lock_guard guard(m_traceMutex);
         count = m_traceCount;
+        if (flight_snapshot) *flight_snapshot = *m_flight_recorder;
+        resource_snapshot = m_resource_history;
         const size_t oldest = (m_traceHead + TraceCapacity - count) % TraceCapacity;
         for (size_t i = 0; i < count; ++i)
             snapshot[i] = m_trace[(oldest + i) % TraceCapacity];
@@ -212,6 +312,19 @@ void MasterSemaphore::DumpRecentSubmissions() const {
                      op.tick, op.operation, op.submitId,
                      op.arg0, op.arg1, op.arg2, op.arg3, op.arg4,
                      op.checkpoint_marker);
+    }
+    if (flight_snapshot && flight_snapshot->Count() != 0) {
+        flight_snapshot->Dump(stderr, KnownGpuTick());
+        if (m_resource_trace_enabled) resource_snapshot.Dump(stderr, false);
+        // Project-local opt-in postmortem log, immune to UI marker truncation.
+        const char* report_path = std::getenv("XXII_COMPAT_GPU_FLIGHT_LOG");
+        if (report_path != nullptr && report_path[0] != '\0') {
+            if (FILE* report = std::fopen(report_path, "ab")) {
+                flight_snapshot->Dump(report, KnownGpuTick(), true, true);
+                if (m_resource_trace_enabled) resource_snapshot.Dump(report, true);
+                std::fclose(report);
+            }
+        }
     }
     std::fflush(stderr);
 }

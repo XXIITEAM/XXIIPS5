@@ -494,7 +494,36 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                         thread_group_x, thread_group_y, thread_group_z, mode,
                         program.shader_hash);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+	buffer.RecordGpuTrace(GpuTrace::Kind::ComputePipeline, 0, 0, 0, program.shader_hash);
+	buffer.RecordGpuTrace(GpuTrace::Kind::ComputeShader, 0, 0, 0, program.shader_hash);
+    // Only an explicitly requested compatibility probe may omit execution
+    // of a single compute shader. This destroys guest rendering dependencies
+    // and is strictly a root-cause isolation test, never a shippable fix.
+    static const uint64_t omit_compute_hash = [] {
+        const char* probe = std::getenv("XXII_COMPAT_PROBE");
+        if (!probe || probe[0] != '1' || probe[1] != '\0') return uint64_t {0};
+        const char* text = std::getenv("XXII_COMPAT_SKIP_COMPUTE_HASH");
+        if (!text || !*text) return uint64_t {0};
+        char* end = nullptr;
+        const uint64_t value = std::strtoull(text, &end, 16);
+        return end != text && *end == '\0' ? value : uint64_t {0};
+    }();
+    if (omit_compute_hash && program.shader_hash == omit_compute_hash) {
+        static std::atomic_uint omitted {0};
+        const auto count = omitted.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (count <= 8 || count % 64 == 0) {
+            std::fprintf(stderr, "XXII_DIAG_COMPUTE_OMIT count=%u shader=0x%016"
+                                 PRIx64 " tick=%" PRIu64 " groups=%u,%u,%u\n",
+                         count, program.shader_hash,
+                         m_context.GetCommandScheduler().CurrentTick(),
+                         thread_group_x, thread_group_y, thread_group_z);
+            std::fflush(stderr);
+        }
+    } else {
+        vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+        buffer.RecordGpuTrace(GpuTrace::Kind::Dispatch, thread_group_x,
+                              thread_group_y, thread_group_z, program.shader_hash);
+    }
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
@@ -560,7 +589,11 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
                         static_cast<uint32_t>(args_addr >> 32u),
                         0, mode, program.shader_hash);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	buffer.RecordGpuTrace(GpuTrace::Kind::ComputePipeline, 0, 0, 0, program.shader_hash);
+	buffer.RecordGpuTrace(GpuTrace::Kind::ComputeShader, 0, 0, 0, program.shader_hash);
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	buffer.RecordGpuTrace(GpuTrace::Kind::DispatchIndirect, 1, 0, 0,
+	                      program.shader_hash, args_offset);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 }

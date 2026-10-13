@@ -1,4 +1,5 @@
 #include "graphics/presentation/systemOverlay.h"
+#include "common/diagnostics/debugAudio.h"
 
 #include <SDL3/SDL.h>
 
@@ -766,6 +767,14 @@ struct SystemOverlay::Impl {
 				LOGF("[Trophy] could not open audio stream: %s\n", SDL_GetError());
 				return;
 			}
+            if (const float gain = Common::DebugAudio::OutputScale(); gain < 1.0f &&
+                !SDL_SetAudioStreamGain(trophy_sound_stream, gain)) {
+                // Optional sound must not break the 10% safety limit.
+                SDL_DestroyAudioStream(trophy_sound_stream);
+                trophy_sound_stream = nullptr;
+                LOGF("[Trophy] skipping sound: debug volume limit unavailable\n");
+                return;
+            }
 		}
 		if (trophy_sound_stream != nullptr &&
 		    (!SDL_PutAudioStreamData(trophy_sound_stream, trophy_sound_data,

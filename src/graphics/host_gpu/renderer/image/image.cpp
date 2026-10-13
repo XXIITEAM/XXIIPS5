@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/image/imageBarrierPolicy.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -150,13 +151,9 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 				EXIT_IF(index >= subresource_states.size());
 				auto& subresource_state = subresource_states[index];
 
-				constexpr auto write_access = vk::AccessFlagBits2::eTransferWrite |
-				                              vk::AccessFlagBits2::eShaderWrite |
-				                              vk::AccessFlagBits2::eMemoryWrite;
-				const bool     repeated_write =
-				    static_cast<bool>(subresource_state.access_mask & write_access);
-				if (subresource_state.layout != destination_layout ||
-				    subresource_state.access_mask != destination_access || repeated_write) {
+				if (ImageOps::RequiresImageBarrier(subresource_state.layout,
+				                                   subresource_state.access_mask,
+				                                   destination_layout, destination_access)) {
 					vk::ImageMemoryBarrier2 barrier {};
 					barrier.srcStageMask                    = subresource_state.pl_stage;
 					barrier.srcAccessMask                   = subresource_state.access_mask;
@@ -182,12 +179,8 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 			subresource_states.clear();
 		}
 	} else {
-		constexpr auto write_access   = vk::AccessFlagBits2::eTransferWrite |
-		                                vk::AccessFlagBits2::eShaderWrite |
-		                                vk::AccessFlagBits2::eMemoryWrite;
-		const bool     repeated_write = static_cast<bool>(state.access_mask & write_access);
-		if (state.layout == destination_layout && state.access_mask == destination_access &&
-		    !repeated_write) {
+		if (!ImageOps::RequiresImageBarrier(state.layout, state.access_mask,
+		                                    destination_layout, destination_access)) {
 			return {};
 		}
 
@@ -213,6 +206,55 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 	return barriers;
 }
 
+void Image::RecordBarrierDiagnostics(std::span<const vk::ImageMemoryBarrier2> barriers) const {
+    if (!m_diagnostic_id || barriers.empty()) return;
+    // Each snapshot is captured *after* the actual vkCmdPipelineBarrier2 call,
+    // never by changing dependencyInfo or guest rendering behavior.
+    // All source/destination flags are 64-bit Vulkan synchronization2 masks.
+    for (const auto& barrier: barriers) {
+        m_scheduler.Current().RecordGpuTrace(
+            GpuTrace::Kind::ImageBarrierId, m_diagnostic_id.index, m_diagnostic_id.generation,
+            static_cast<uint32_t>(barrier.oldLayout),
+            (uint64_t {static_cast<uint32_t>(barrier.newLayout)} << 32u) |
+                static_cast<uint32_t>(backing.format),
+            static_cast<uint64_t>(barrier.dstAccessMask));
+        m_scheduler.Current().RecordGpuTrace(
+            GpuTrace::Kind::ImageBarrierStages, m_diagnostic_id.index, m_diagnostic_id.generation,
+            0, static_cast<uint64_t>(barrier.srcStageMask),
+            static_cast<uint64_t>(barrier.dstStageMask));
+        m_scheduler.Current().RecordGpuTrace(
+            GpuTrace::Kind::ImageBarrierAccess, m_diagnostic_id.index, m_diagnostic_id.generation,
+            0, static_cast<uint64_t>(barrier.srcAccessMask),
+            static_cast<uint64_t>(barrier.dstAccessMask));
+        const auto& range = barrier.subresourceRange;
+        m_scheduler.Current().RecordGpuTrace(
+            GpuTrace::Kind::ImageBarrierSubresource, m_diagnostic_id.index,
+            m_diagnostic_id.generation, range.baseMipLevel,
+            (uint64_t {range.levelCount} << 32u) | range.baseArrayLayer,
+            (uint64_t {range.layerCount} << 32u) |
+                static_cast<uint32_t>(range.aspectMask));
+    }
+    m_scheduler.Current().RecordGpuTrace(
+        GpuTrace::Kind::ImageBarrier, static_cast<uint32_t>(barriers.size()),
+        static_cast<uint32_t>(barriers.back().newLayout),
+        static_cast<uint32_t>(backing.format),
+        static_cast<uint64_t>(barriers.back().dstAccessMask));
+    constexpr vk::AccessFlags2 attachment_writes =
+        vk::AccessFlagBits2::eColorAttachmentWrite |
+        vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
+    for (const auto& barrier: barriers) {
+        if (barrier.oldLayout == barrier.newLayout &&
+            barrier.srcAccessMask == barrier.dstAccessMask &&
+            static_cast<bool>(barrier.srcAccessMask & attachment_writes)) {
+            m_scheduler.Current().RecordGpuTrace(
+                GpuTrace::Kind::KnownAttachmentWriteFix,
+                static_cast<uint32_t>(barrier.oldLayout),
+                static_cast<uint32_t>(barrier.subresourceRange.aspectMask),
+                static_cast<uint32_t>(backing.format),
+                static_cast<uint64_t>(barrier.srcAccessMask));
+        }
+    }
+}
 void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
                     std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer) {
 	const auto transfer_access =
@@ -236,6 +278,7 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 	dependency.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
 	dependency.pImageMemoryBarriers    = barriers.data();
 	command_buffer.pipelineBarrier2(dependency);
+	RecordBarrierDiagnostics(barriers);
 }
 
 void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
@@ -263,6 +306,7 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
 	dependency.pImageMemoryBarriers     = image_barriers.data();
 	auto command                        = m_scheduler.Current().Handle();
 	command.pipelineBarrier2(dependency);
+	RecordBarrierDiagnostics(image_barriers);
 	command.copyBufferToImage(buffer, backing.image, vk::ImageLayout::eTransferDstOptimal,
 	                          static_cast<uint32_t>(copies.size()), copies.data());
 	buffer_barrier.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
@@ -303,6 +347,7 @@ void Image::Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buf
 	dependency.pImageMemoryBarriers     = image_barriers.data();
 	auto command                        = m_scheduler.Current().Handle();
 	command.pipelineBarrier2(dependency);
+	RecordBarrierDiagnostics(image_barriers);
 	command.copyImageToBuffer(backing.image, vk::ImageLayout::eTransferSrcOptimal, buffer,
 	                          static_cast<uint32_t>(copies.size()), copies.data());
 	buffer_barrier.srcStageMask  = vk::PipelineStageFlagBits2::eCopy;

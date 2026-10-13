@@ -27,6 +27,7 @@
 #include "loader/timer.h"
 
 #include <cstdlib>
+#include <cstdio>
 #include <filesystem>
 #include <thread>
 
@@ -86,6 +87,16 @@ static void MountSandboxDirs() {
 	MountOrCreateDir("_DownloadData/" + title_id, "/download0");
 	MountOrCreateDir("_TempData/" + title_id, "/temp0");
 	MountOrCreateDir("_TempData/" + title_id, "/temp");
+	// Opt-in local capture of native Unity/PS5 debug output. The game sees a
+	// writable devlog mount; original installed game files remain read-only.
+	const char* probe = std::getenv("XXII_COMPAT_PROBE");
+	const char* enable_devlog = std::getenv("XXII_COMPAT_PS5_DEVLOG");
+	if (probe && probe[0] == '1' && probe[1] == '\0' &&
+	    enable_devlog && enable_devlog[0] == '1' && enable_devlog[1] == '\0') {
+		MountOrCreateDir("_Logs/" + title_id, "/devlog/app");
+		std::fprintf(stderr, "XXII_PS5_DEVLOG_MOUNT enabled=1\n");
+		std::fflush(stderr);
+	}
 }
 
 static bool ClearDirectoryContents(const std::filesystem::path& dir) {

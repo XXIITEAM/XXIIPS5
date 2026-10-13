@@ -1,6 +1,7 @@
 #include "loader/runtimeLinker.h"
 
 #include "common/assert.h"
+#include "common/diagnostics/hleTrace.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -194,6 +195,7 @@ static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id) {
 	if (log_index < 1024) {
 		if (record_id < g_stubbed_imports.size()) {
 			const auto& record = g_stubbed_imports[record_id];
+            Common::HleTrace::UnresolvedImport(record.name, record.index);
 			printf("Unresolved import stub called: %s\n", record.name.c_str());
 			LOGF("Unresolved import stub called [%u]: patch_vaddr=0x%016" PRIx64
 			     " jmprela_index=%" PRIu32 " symbol=%s type=%s bind=%s program=%s\n",

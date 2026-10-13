@@ -344,8 +344,10 @@ void TestSynchronousDevicePushBypassesModelledQueue() {
 	Check(AudioOut2::AudioOut2PortCreate(context, AsParam(&param), &port) == OK,
 	      "device port create failed");
 
-	uint32_t pcm[512] {};
-	SetPcm(port, pcm);
+	// FloatStereo: 512 frames * 2 channels * sizeof(float) = 4096 bytes.
+	// A 512-element uint32_t buffer is only 2048 bytes; copying it is UB.
+	std::array<float, 512 * 2> pcm {};
+	SetPcm(port, pcm.data());
 	ResetOutputCalls();
 
 	Check(AudioOut2::AudioOut2ContextPush(context, 1) == OK, "first sync push failed");
@@ -391,8 +393,10 @@ void TestAsynchronousDevicePushKeepsQueueBounded() {
 	Check(AudioOut2::AudioOut2PortCreate(context, AsParam(&param), &port) == OK,
 	      "device port create failed");
 
-	uint32_t pcm[512] {};
-	SetPcm(port, pcm);
+	// FloatStereo: 512 frames * 2 channels * sizeof(float) = 4096 bytes.
+	// A 512-element uint32_t buffer is only 2048 bytes; copying it is UB.
+	std::array<float, 512 * 2> pcm {};
+	SetPcm(port, pcm.data());
 	ResetOutputCalls();
 
 	Check(AudioOut2::AudioOut2ContextPush(context, 0) == OK, "first async push failed");

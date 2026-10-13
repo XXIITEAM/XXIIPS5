@@ -1,6 +1,7 @@
 #include "common/assert.h"
 
 #include "common/logging/log.h"
+#include "common/diagnostics/hleTrace.h"
 #include "common/subsystems.h"
 #include "kytyGitVersion.h"
 
@@ -24,20 +25,24 @@ static int DbgReport(const char* title, std::string_view text, const char* file,
 }
 
 int DbgExitIfHandler(const char* expr, const char* file, int line) {
+    HleTrace::Failure("assert_condition", file, line);
 	return DbgReport("--- Fatal Error ---", fmt::format("Error: condition ({}) is true", expr),
 	                 file, line);
 }
 
 int DbgNotImplementedHandler(const char* expr, const char* file, int line) {
+    HleTrace::Failure("not_implemented", file, line);
 	return DbgReport("--- Fatal Error ---", fmt::format("Not implemented ({})", expr), file, line);
 }
 
 int DbgExitHandler(const char* file, int line, std::string_view text) {
+    HleTrace::Failure("fatal_exit", file, line);
 	Log::WriteFatal(BuildFatalReport("--- Error ---", text, file, line));
 	return 1;
 }
 
 int DbgExitHandler(const char* file, int line, fmt::text_style style, std::string_view text) {
+    HleTrace::Failure("fatal_exit", file, line);
 	Log::WriteFatal(style, BuildFatalReport("--- Error ---", text, file, line));
 	return 1;
 }

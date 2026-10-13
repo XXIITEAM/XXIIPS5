@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/host_gpu/renderer/gpuFlightRecorder.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
@@ -102,6 +103,11 @@ public:
 
 	[[nodiscard]] bool IsInvalid() const;
 
+	void RecordGpuTrace(GpuTrace::Kind kind, uint32_t a = 0, uint32_t b = 0,
+	                    uint32_t c = 0, uint64_t identity = 0,
+	                    uint64_t extra = 0) const noexcept {
+		if (m_gpu_trace_enabled) m_gpu_trace.Push(kind, a, b, c, identity, extra);
+	}
 	void SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0 = 0, uint32_t arg1 = 0,
 	                  uint32_t arg2 = 0, uint32_t arg3 = 0, uint64_t arg4 = 0);
 	void BeginRendering(const RenderState& state) const;
@@ -128,6 +134,8 @@ private:
 	RenderContext&      m_context;
 	GraphicContext&     m_graphics;
 	vk::CommandBuffer   m_buffer          = nullptr;
+	mutable GpuTrace::CommandTrace m_gpu_trace {};
+	bool                m_gpu_trace_enabled = false;
 	uint32_t            m_debug_op        = 0;
 	uint64_t            m_debug_submit_id = 0;
 	uint32_t            m_debug_arg0      = 0;

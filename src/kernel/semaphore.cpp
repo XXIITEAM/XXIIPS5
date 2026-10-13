@@ -1,6 +1,7 @@
 #include "kernel/semaphore.h"
 
 #include "common/assert.h"
+#include "common/diagnostics/hleTrace.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -624,8 +625,11 @@ int KYTY_SYSV_ABI sem_destroy(void* sem) {
 }
 
 int KYTY_SYSV_ABI sem_wait(void* sem) {
+    Common::HleTrace::Span hle("sem_wait", "infinite");
 	const int result = SemTimedwaitImpl(sem, nullptr);
-	return (result == OK ? 0 : SetErrnoReturn(result));
+    const int guestResult = result == OK ? 0 : SetErrnoReturn(result);
+    hle.Finish(guestResult);
+    return guestResult;
 }
 
 int KYTY_SYSV_ABI sem_trywait(void* sem) {
@@ -697,8 +701,11 @@ int KYTY_SYSV_ABI PthreadSemDestroy(void* sem) {
 }
 
 int KYTY_SYSV_ABI PthreadSemWait(void* sem) {
+    Common::HleTrace::Span hle("pthread_sem_wait", "infinite");
 	const int result = Posix::SemTimedwaitImpl(sem, nullptr);
-	return (result == OK ? OK : Posix::PosixToKernel(result));
+    const int guestResult = result == OK ? OK : Posix::PosixToKernel(result);
+    hle.Finish(guestResult);
+    return guestResult;
 }
 
 int KYTY_SYSV_ABI PthreadSemTrywait(void* sem) {

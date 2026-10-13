@@ -358,6 +358,23 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	EXIT_IF(!m_command.IsInvalid());
 	m_command.m_buffer = m_command_pool.Commit();
 	m_command.Begin();
+    // Diagnostic-only execution checkpoint at the START of each Vulkan
+    // command buffer, paired with the existing tail checkpoint in Submit().
+    // A lost device with begin-but-no-tail narrows the fault to this buffer;
+    // absence of begin does not prove which prior GPU command caused the fault.
+    if (m_graphics.device_checkpoints_enabled) {
+        const auto checkpoint = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(
+                static_cast<VkDevice>(m_graphics.device), "vkCmdSetCheckpointNV"));
+        if (checkpoint) {
+            constexpr uint64_t BeginTag = UINT64_C(1) << 42;
+            constexpr uint64_t TickMask = BeginTag - 1;
+            const uint64_t marker = BeginTag | (m_master.CurrentTick() & TickMask);
+            checkpoint(static_cast<VkCommandBuffer>(m_command.m_buffer),
+                       reinterpret_cast<const void*>(
+                           static_cast<uintptr_t>(marker)));
+        }
+    }
 	m_dynamic_state.Invalidate();
 	return m_command;
 }
@@ -431,7 +448,9 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
     m_master.RecordSubmission(tick, m_command.m_debug_op, m_command.m_debug_submit_id,
                               m_command.m_debug_arg0, m_command.m_debug_arg1,
                               m_command.m_debug_arg2, m_command.m_debug_arg3,
-                              m_command.m_debug_arg4, checkpoint_marker);
+                              m_command.m_debug_arg4, checkpoint_marker,
+                              m_command.m_gpu_trace);
+    m_master.SampleFlightRecorder(tick);
     const auto syncStart = ProbeSerializeAfterTick();
     if (syncStart != 0 && tick >= syncStart) {
         // The current submit was successful. A failing wait now reports the

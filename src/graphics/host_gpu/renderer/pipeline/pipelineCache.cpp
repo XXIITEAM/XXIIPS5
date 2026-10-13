@@ -30,6 +30,7 @@
 #include <limits>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
+#include <spirv-tools/optimizer.hpp>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -296,6 +297,32 @@ struct PipelineCache::ProgramCache {
 	                               std::span<const uint32_t> function_code) {
 		auto result = ShaderRecompiler::CompileProgram(std::move(translated), options,
 		                                               specialization, push_data_start_dword);
+        // Differential shader test only. Do not enable by default, and never
+        // use successful SPIR-V validation alone as evidence of game support.
+        static const uint64_t optimize_watch_hash = [] {
+            const char* probe = std::getenv("XXII_COMPAT_PROBE");
+            if (!probe || probe[0] != '1' || probe[1] != '\0') return uint64_t {0};
+            const char* input = std::getenv("XXII_COMPAT_OPTIMIZE_SHADER_HASH");
+            if (!input || !*input) return uint64_t {0};
+            char* end = nullptr;
+            const uint64_t hash = std::strtoull(input, &end, 16);
+            return end != input && *end == '\0' ? hash : uint64_t {0};
+        }();
+        if (optimize_watch_hash && optimize_watch_hash == options.shader_hash) {
+            spvtools::Optimizer optimizer(SPV_ENV_VULKAN_1_3);
+            optimizer.RegisterPerformancePasses();
+            std::vector<uint32_t> optimized;
+            const size_t before = result.spirv.size();
+            const bool succeeded = optimizer.Run(result.spirv.data(), before, &optimized);
+            std::fprintf(stderr,
+                         "XXII_SPV_OPT_WATCH shader=0x%016" PRIx64
+                         " pass=%d words_before=%zu words_after=%zu\n",
+                         options.shader_hash, succeeded ? 1 : 0, before, optimized.size());
+            std::fflush(stderr);
+            if (succeeded && !optimized.empty()) {
+                result.spirv = std::move(optimized);
+            }
+        }
 		if (!ValidateShaderSpirv(options.dump_label, options.shader_hash, result.spirv)) {
 			DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
 			EXIT("%s failed hash=0x%016" PRIx64 ": SPIR-V validation failed\n", options.dump_label,
@@ -305,6 +332,31 @@ struct PipelineCache::ProgramCache {
 
 		const auto module = CompileSPV(result.spirv, device);
 		EXIT_IF(module == nullptr);
+		// Name only the targeted guest shader when running a private, explicit
+		// GPU-assisted compatibility probe. Vulkan Validation Layers can then
+		// selectively instrument this debug-named module at pipeline creation.
+		if (std::getenv("XXII_COMPAT_PROBE") != nullptr &&
+		    std::getenv("XXII_COMPAT_GPU_AV") != nullptr) {
+			const char* requested = std::getenv("XXII_COMPAT_GPUAV_TARGET_HASH");
+			if (requested != nullptr && *requested != '\0') {
+				char* end = nullptr;
+				const uint64_t wanted = std::strtoull(requested, &end, 16);
+				if (end != requested && *end == '\0' && wanted == options.shader_hash) {
+					bool named = false;
+					if (VULKAN_HPP_DEFAULT_DISPATCHER.vkSetDebugUtilsObjectNameEXT != nullptr) {
+						vk::DebugUtilsObjectNameInfoEXT name_info {};
+						name_info.objectType = vk::ObjectType::eShaderModule;
+						name_info.objectHandle = static_cast<uint64_t>(
+						    reinterpret_cast<uintptr_t>(static_cast<VkShaderModule>(module)));
+						name_info.pObjectName = "XXII_GPUAV_WATCH";
+						named = device.setDebugUtilsObjectNameEXT(&name_info) == vk::Result::eSuccess;
+					}
+					std::fprintf(stderr, "XXII_GPUAV_SELECT hash=0x%016" PRIx64
+					                     " named=%d\n", options.shader_hash, named ? 1 : 0);
+					std::fflush(stderr);
+				}
+			}
+		}
 		if (options.dump_ir) {
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
 			     static_cast<uint64_t>(result.spirv.size()), options.wave_size);

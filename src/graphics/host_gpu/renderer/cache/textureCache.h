@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
+#include "graphics/host_gpu/renderer/gpuResourceLifetime.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
@@ -119,6 +120,8 @@ private:
 	void                      UnregisterImage(ImageId id);
 	void                      DeleteImage(ImageId id);
 	void                      FreeImage(ImageId id);
+    void                      LogImageLifetime(GpuTrace::ResourceAction action, ImageId id,
+                                               const Image& image, uint64_t retire_tick = 0);
 	void                      TouchImage(Image& image);
 	void                      TrackImage(ImageId id);
 	void                      TrackImageHead(ImageId id);

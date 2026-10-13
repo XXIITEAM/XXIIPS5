@@ -39227,12 +39227,15 @@ void CheckImageTransitionState(RenderContext &renderer) {
                                  vk::AccessFlagBits2::eColorAttachmentWrite;
   (void)image.GetBarriers(vk::ImageLayout::eColorAttachmentOptimal,
                           attachment_access, graphics_stage, {});
-  Require(name, "pinned attachment-write quirk",
-          image
-              .GetBarriers(vk::ImageLayout::eColorAttachmentOptimal,
-                           attachment_access, graphics_stage, {})
-              .empty(),
-          "attachment writes diverged from the pinned repeated-write set");
+  barriers = image.GetBarriers(vk::ImageLayout::eColorAttachmentOptimal,
+                               attachment_access, graphics_stage, {});
+  Require(name, "repeated attachment-write dependency",
+          barriers.size() == 1 &&
+              barriers[0].oldLayout == vk::ImageLayout::eColorAttachmentOptimal &&
+              barriers[0].newLayout == vk::ImageLayout::eColorAttachmentOptimal &&
+              static_cast<bool>(
+                  barriers[0].srcAccessMask & vk::AccessFlagBits2::eColorAttachmentWrite),
+          "consecutive color attachment writes must keep their WAW dependency");
 
   image.backing.state = {};
   image.backing.subresource_states.clear();

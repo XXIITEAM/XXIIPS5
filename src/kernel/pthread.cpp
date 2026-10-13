@@ -1,6 +1,7 @@
 #include "kernel/pthread.h"
 
 #include "common/assert.h"
+#include "common/diagnostics/hleTrace.h"
 #include "common/common.h"
 #include "common/dateTime.h"
 #include "common/emulatorConfig.h"
@@ -4266,9 +4267,10 @@ int KYTY_SYSV_ABI pthread_condattr_destroy(LibKernel::PthreadCondattr* attr) {
 }
 
 int KYTY_SYSV_ABI pthread_cond_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex) {
-	// PRINT_NAME();
-
-	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondWait(cond, mutex));
+    Common::HleTrace::Span hle("pthread_cond_wait", "infinite");
+    const int result = POSIX_PTHREAD_CALL(LibKernel::PthreadCondWait(cond, mutex));
+    hle.Finish(result);
+    return result;
 }
 
 int KYTY_SYSV_ABI pthread_cond_timedwait(LibKernel::PthreadCond*          cond,

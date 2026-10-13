@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <cstdlib>
 namespace Libs::Graphics {
 
 CommandBuffer::CommandBuffer(CommandScheduler& scheduler)
@@ -30,6 +31,14 @@ vk::CommandBuffer CommandBuffer::Handle() const {
 
 void CommandBuffer::Begin() {
 	EXIT_IF(m_rendering || IsInvalid());
+	m_gpu_trace.Reset();
+	static const bool flight_enabled = [] {
+		const char* probe = std::getenv("XXII_COMPAT_PROBE");
+		const char* mode = std::getenv("XXII_COMPAT_GPU_FLIGHT_RECORDER");
+		return probe && probe[0] == '1' && probe[1] == '\0' &&
+		       mode && mode[0] == '1' && mode[1] == '\0';
+	}();
+	m_gpu_trace_enabled = flight_enabled;
 	auto buffer = Handle();
 
 	vk::CommandBufferBeginInfo begin_info {};
@@ -58,6 +67,41 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
 	m_debug_arg2      = arg2;
 	m_debug_arg3      = arg3;
 	m_debug_arg4      = arg4;
+	RecordGpuTrace(GpuTrace::Kind::GuestBegin, op, arg0, arg1, submit_id, arg4);
+    // Optional per-operation GPU execution marker. The ordinary game path
+    // remains unchanged unless both an explicit compatibility probe and a
+    // numeric start tick are supplied. This marker is recorded BEFORE the
+    // guest op adds its Vulkan commands to this command buffer.
+    static const uint64_t op_checkpoint_start = [] {
+        if (std::getenv("XXII_COMPAT_PROBE") == nullptr) return uint64_t {0};
+        const char* value = std::getenv("XXII_GPU_OP_CHECKPOINT_START");
+        if (!value || !*value) return uint64_t {0};
+        char* end = nullptr;
+        const auto tick = std::strtoull(value, &end, 10);
+        return end != value && *end == '\0' && tick >= 1000 && tick <= 10000000
+                   ? static_cast<uint64_t>(tick) : uint64_t {0};
+    }();
+    if (op_checkpoint_start && m_graphics.device_checkpoints_enabled &&
+        m_buffer != nullptr &&
+        m_context.GetCommandScheduler().CurrentTick() >= op_checkpoint_start) {
+        const auto checkpoint = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(
+                static_cast<VkDevice>(m_graphics.device), "vkCmdSetCheckpointNV"));
+        if (checkpoint) {
+            constexpr uint64_t OpTag = UINT64_C(1) << 41;
+            // Preserve arg0 to distinguish a DrawIndex entry (e.g. 600)
+            // from subsequent SetDrawDebugPhase calls (e.g. 0x100).
+            // Submit IDs are truncated to their low 23 bits in this marker.
+            constexpr uint64_t SubmitMask = (UINT64_C(1) << 23) - 1;
+            constexpr uint64_t ArgMask = (UINT64_C(1) << 12) - 1;
+            const uint64_t marker = OpTag | ((submit_id & SubmitMask) << 18) |
+                                    ((static_cast<uint64_t>(arg0) & ArgMask) << 6) |
+                                    (static_cast<uint64_t>(op) & 63);
+            checkpoint(static_cast<VkCommandBuffer>(m_buffer),
+                       reinterpret_cast<const void*>(
+                           static_cast<uintptr_t>(marker)));
+        }
+    }
 }
 
 void CommandBuffer::BeginRendering(const RenderState& state) const {
@@ -104,6 +148,9 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	rendering.pDepthAttachment     = depth_stencil.has_depth ? &depth : nullptr;
 	rendering.pStencilAttachment   = depth_stencil.has_stencil ? &stencil : nullptr;
 	Handle().beginRendering(rendering);
+	RecordGpuTrace(GpuTrace::Kind::RenderingBegin, state.width, state.height,
+	               state.num_color_attachments, state.num_layers,
+	               depth_stencil.has_depth ? 1u : 0u);
 	m_render_state = state;
 	m_rendering    = true;
 }
@@ -113,6 +160,7 @@ void CommandBuffer::EndRendering() const {
 		return;
 	}
 	Handle().endRendering();
+	RecordGpuTrace(GpuTrace::Kind::RenderingEnd);
 	m_rendering    = false;
 	m_render_state = {};
 }

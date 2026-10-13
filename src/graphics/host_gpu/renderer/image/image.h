@@ -52,6 +52,8 @@ public:
 	~Image();
 	KYTY_CLASS_NO_COPY(Image);
 
+	// Cache-owned stable slot and generation for CPU-only diagnostic markers.
+	void SetDiagnosticId(ImageId id) noexcept { m_diagnostic_id = id; }
 	[[nodiscard]] vk::ImageView FindView(const ImageViewInfo& view_info);
 	using Barriers = std::vector<vk::ImageMemoryBarrier2>;
 	[[nodiscard]] Barriers GetBarriers(vk::ImageLayout                      destination_layout,
@@ -156,6 +158,7 @@ public:
 
 private:
 	friend struct ImageTestAccess;
+	void RecordBarrierDiagnostics(std::span<const vk::ImageMemoryBarrier2> barriers) const;
 
 	[[nodiscard]] static vk::ImageAspectFlags FullAspectMask(vk::Format format) noexcept;
 	[[nodiscard]] static uint32_t             CopyRows(uint64_t row_size, uint32_t rows,
@@ -163,6 +166,7 @@ private:
 	[[nodiscard]] static std::pair<uint32_t, uint32_t>
 	SanitizeCopyLayers(const Image& source, const Image& destination, uint32_t depth);
 
+	ImageId           m_diagnostic_id {};
 	GraphicContext&   m_graphics;
 	CommandScheduler& m_scheduler;
 	uint64_t          m_maybe_cpu_hash   = 0;
