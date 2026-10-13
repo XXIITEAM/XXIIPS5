@@ -29,6 +29,8 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -306,6 +308,36 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = *input_info.stage.resources;
+    // One-time, explicitly targeted shader metadata for the failing Syberia
+    // command. No shader bytecode, guest pointers or assets leave the runner.
+    // Normal game launches and unrelated shaders pay only a small static test.
+    static const uint64_t watched_hash = [] {
+        if (std::getenv("XXII_COMPAT_PROBE") == nullptr) return uint64_t {0};
+        const char* text = std::getenv("XXII_COMPAT_SHADER_HASH");
+        if (!text || !*text) return uint64_t {0};
+        char* end = nullptr;
+        const auto value = std::strtoull(text, &end, 16);
+        return end != text && *end == '\0' ? static_cast<uint64_t>(value) : uint64_t {0};
+    }();
+    static std::atomic_bool reported_shader {false};
+    if (watched_hash != 0 && program.shader_hash == watched_hash &&
+        !reported_shader.exchange(true, std::memory_order_relaxed)) {
+        std::fprintf(stderr,
+            "XXII_SHADER_META kind=compute hash=0x%016" PRIx64
+            " lds=%d lds_atomics=%d lds_atomic64=%d dma=%d gds=%d"
+            " buffers=%zu images=%zu samplers=%zu wave=%u"
+            " local=%u,%u,%u workgroups=%u,%u,%u\n",
+            program.shader_hash, program.info.uses_lds ? 1 : 0,
+            program.info.shared_atomics ? 1 : 0,
+            program.info.shared_int64_atomics ? 1 : 0,
+            program.info.uses_dma ? 1 : 0, program.info.uses_gds ? 1 : 0,
+            program.info.buffers.size(), program.info.images.size(),
+            program.info.samplers.size(), program.wave_size,
+            input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2],
+            input_info.workgroup_counts[0], input_info.workgroup_counts[1],
+            input_info.workgroup_counts[2]);
+        std::fflush(stderr);
+    }
 	if (resources.specialization_reads.empty() &&
 	    (TryConsumeComputeMetaClear(input_info, buffer) ||
 	     TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,

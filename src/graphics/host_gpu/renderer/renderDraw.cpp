@@ -1202,6 +1202,43 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// memory.
 	auto vk_buffer = buffer.Handle();
     const uint32_t shader_fingerprint = DrawShaderFingerprint(state);
+    // Trace a single failing pipeline identity, never guest shader bytes.
+    static const uint32_t watched_fingerprint = [] {
+        if (std::getenv("XXII_COMPAT_PROBE") == nullptr) return uint32_t {0};
+        const char* text = std::getenv("XXII_COMPAT_DRAW_FINGERPRINT");
+        if (!text || !*text) return uint32_t {0};
+        char* end = nullptr;
+        const auto parsed = std::strtoul(text, &end, 10);
+        return end != text && *end == '\0' && parsed <= UINT32_MAX
+                   ? static_cast<uint32_t>(parsed) : uint32_t {0};
+    }();
+    static std::atomic_bool reported_fingerprint {false};
+    if (watched_fingerprint != 0 && shader_fingerprint == watched_fingerprint &&
+        !reported_fingerprint.exchange(true, std::memory_order_relaxed)) {
+        std::fprintf(stderr, "XXII_SHADER_META kind=draw fp=%u index_count=%u"
+                             " colors=%u pixel_active=%d vertex_stages=%u\n",
+                     shader_fingerprint, draw.index_count, state.color_count,
+                     state.ps_active ? 1 : 0, state.programs.VertexStageCount());
+        for (uint32_t i = 0; i < state.programs.VertexStageCount(); ++i) {
+            const auto* shader = state.vertex_info[i].stage.program;
+            if (!shader) continue;
+            std::fprintf(stderr, "XXII_SHADER_META kind=vertex stage=%u"
+                                 " hash=0x%016" PRIx64 " dma=%d buffers=%zu images=%zu"
+                                 " address_writes=%d\n",
+                         i, shader->shader_hash, shader->info.uses_dma ? 1 : 0,
+                         shader->info.buffers.size(), shader->info.images.size(),
+                         shader->has_address_writes ? 1 : 0);
+        }
+        if (state.ps_active && state.ps_input_info.stage.program) {
+            const auto* shader = state.ps_input_info.stage.program;
+            std::fprintf(stderr, "XXII_SHADER_META kind=pixel hash=0x%016" PRIx64
+                                 " dma=%d buffers=%zu images=%zu address_writes=%d\n",
+                         shader->shader_hash, shader->info.uses_dma ? 1 : 0,
+                         shader->info.buffers.size(), shader->info.images.size(),
+                         shader->has_address_writes ? 1 : 0);
+        }
+        std::fflush(stderr);
+    }
 	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u,
                       shader_fingerprint);
 	if (!mesh_active) {
