@@ -7664,7 +7664,10 @@ void TestNewShaderRecompilerDsReadWrite2Translation() {
   Check((result.decoded_dump.find("dwords=4 bits=32") != std::string::npos),
         "DS read2 b64 decode did not preserve four-dword metadata");
   Check(SpirvContainsOpcode(result.spirv, 62),
-        "SPIR-V binary does not contain OpStore");
+        "non-atomic DS shader must retain ordinary OpStore");
+  Check(!SpirvContainsOpcode(result.spirv, 227) &&
+            !SpirvContainsOpcode(result.spirv, 229),
+        "non-atomic DS shader unexpectedly emitted atomic LDS dword accesses");
   Check(SpirvContainsOpcode(result.spirv, 65),
         "SPIR-V binary does not contain OpAccessChain");
   CheckSpirvBinaryValidates(result.spirv);
@@ -7810,8 +7813,12 @@ void TestNewShaderRecompilerDsWideAndAtomicTranslation() {
         "new decoder did not decode DS or atomic");
   Check((result.decoded_dump.find("dwords=4 bits=32") != std::string::npos),
         "new decoder did not expose DS wide width metadata");
-  Check(SpirvContainsOpcode(result.spirv, 62),
-        "SPIR-V binary does not contain OpStore");
+  // Mixed DS read/write and atomic operations may target the same LDS
+  // dwords. Regular OpLoad/OpStore on those words is a Vulkan data race.
+  Check(SpirvContainsOpcode(result.spirv, 227),
+        "mixed LDS shader must atomically load dwords (OpAtomicLoad)");
+  Check(SpirvContainsOpcode(result.spirv, 229),
+        "mixed LDS shader must atomically exchange dword stores (OpAtomicExchange)");
   Check(SpirvContainsOpcode(result.spirv, 237),
         "SPIR-V binary does not contain OpAtomicUMin");
   Check(SpirvContainsOpcode(result.spirv, 239),
