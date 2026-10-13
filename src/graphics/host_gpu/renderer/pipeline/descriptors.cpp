@@ -366,26 +366,29 @@ static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::Image
 			break;
 		default: EXIT("null image has unsupported numeric class\n");
 	}
-    const auto policy =
-        SelectNullTextureFormat(VulkanFormat(desc.info.guest_format), resource.depth_compare,
-                                resource.atomic64);
-    if (policy.image_format == vk::Format::eUndefined) {
+    const auto ordinary_format = VulkanFormat(desc.info.guest_format);
+    const auto kind = SelectNullTextureKind(ordinary_format == vk::Format::eR32Sfloat,
+                                            resource.depth_compare, resource.atomic64);
+    if (kind == NullTextureKind::Unsupported) {
         EXIT("null texture cannot satisfy comparison sampling: class=%u compare=%d atomic64=%d\n",
              static_cast<uint32_t>(resource.numeric_class), resource.depth_compare,
              resource.atomic64);
     }
     // A missing PS5 shadow map still needs a depth-compatible image view.
     // Keep ordinary float/color and atomic64 null images unchanged.
-	desc.info.pixel_format    = policy.image_format;
+    const bool depth = kind == NullTextureKind::DepthComparison;
+	desc.info.pixel_format    = depth ? vk::Format::eD32Sfloat : ordinary_format;
 	desc.info.type            = Prospero::ImageType::kColor2D;
 	desc.info.extent          = {1, 1, 1};
 	desc.info.resources       = {1, 1};
 	desc.info.bytes_per_block = Prospero::NumBytesPerElement(desc.info.guest_format);
 	desc.info.samples         = 1;
 	desc.info.mip_layout[0]   = {0, 0, 1, 1};
-	desc.view_info.format     = policy.view_format;
+	desc.view_info.format     = depth ? vk::Format::eD32Sfloat :
+                                  resource.atomic64 ? vk::Format::eR64Uint : ordinary_format;
 	desc.view_info.type       = vk::ImageViewType::e2D;
-	desc.view_info.aspect     = policy.aspect;
+	desc.view_info.aspect     = depth ? vk::ImageAspectFlagBits::eDepth
+                                   : vk::ImageAspectFlagBits::eColor;
 	desc.view_info.usage      = binding == TextureCache::BindingType::Storage
 	                                ? vk::ImageUsageFlagBits::eStorage
 	                                : vk::ImageUsageFlagBits::eSampled;

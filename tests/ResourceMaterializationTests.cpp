@@ -796,27 +796,19 @@ void TestFiniteImageRefreshReusesScalarReads() {
 
 void TestNullDepthComparisonImageFormat() {
   using namespace Libs::Graphics;
-  const auto color = SelectNullTextureFormat(vk::Format::eR32Sfloat, false, false);
-  Check(color.image_format == vk::Format::eR32Sfloat &&
-            color.view_format == vk::Format::eR32Sfloat &&
-            color.aspect == vk::ImageAspectFlagBits::eColor,
-        "ordinary R32_FLOAT null texture no longer preserves color sampling");
-  const auto depth = SelectNullTextureFormat(vk::Format::eR32Sfloat, true, false);
-  Check(depth.image_format == vk::Format::eD32Sfloat &&
-            depth.view_format == vk::Format::eD32Sfloat &&
-            depth.aspect == vk::ImageAspectFlagBits::eDepth,
-        "null comparison texture incorrectly binds R32_SFLOAT instead of D32_SFLOAT");
-  const auto integer = SelectNullTextureFormat(vk::Format::eR32Uint, false, false);
-  Check(integer.image_format == vk::Format::eR32Uint &&
-            integer.aspect == vk::ImageAspectFlagBits::eColor,
-        "unsigned integer null texture lost its original Vulkan format");
-  const auto atomic64 = SelectNullTextureFormat(vk::Format::eR32G32Uint, false, true);
-  Check(atomic64.image_format == vk::Format::eR32G32Uint &&
-            atomic64.view_format == vk::Format::eR64Uint,
-        "64-bit atomic null image view format regressed");
-  const auto unsupported = SelectNullTextureFormat(vk::Format::eR32Uint, true, false);
-  Check(unsupported.image_format == vk::Format::eUndefined,
-        "invalid integer depth-comparison null texture was silently accepted");
+  // SelectNullTextureKind is deliberately independent from the Vulkan SDK,
+  // which the standalone resource materialization target does not link.
+  Check(SelectNullTextureKind(true, false, false) == NullTextureKind::Color,
+        "ordinary R32_FLOAT null texture lost normal color sampling");
+  Check(SelectNullTextureKind(true, true, false) == NullTextureKind::DepthComparison,
+        "null shadow-map texture did not select a depth-compatible host image");
+  Check(SelectNullTextureKind(false, false, false) == NullTextureKind::Color,
+        "integer null texture was incorrectly classified as depth");
+  Check(SelectNullTextureKind(false, false, true) == NullTextureKind::Color,
+        "64-bit atomic null texture lost its ordinary host format");
+  Check(SelectNullTextureKind(false, true, false) == NullTextureKind::Unsupported &&
+            SelectNullTextureKind(true, true, true) == NullTextureKind::Unsupported,
+        "incompatible depth-comparison null texture was silently accepted");
 }
 
 void TestDepthComparisonSamplerDoesNotPoisonFloatSamples() {
