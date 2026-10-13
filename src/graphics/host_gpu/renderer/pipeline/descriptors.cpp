@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
+#include "graphics/host_gpu/renderer/image/nullTextureFormat.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -365,16 +366,26 @@ static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::Image
 			break;
 		default: EXIT("null image has unsupported numeric class\n");
 	}
-	desc.info.pixel_format    = VulkanFormat(desc.info.guest_format);
+    const auto policy =
+        SelectNullTextureFormat(VulkanFormat(desc.info.guest_format), resource.depth_compare,
+                                resource.atomic64);
+    if (policy.image_format == vk::Format::eUndefined) {
+        EXIT("null texture cannot satisfy comparison sampling: class=%u compare=%d atomic64=%d\n",
+             static_cast<uint32_t>(resource.numeric_class), resource.depth_compare,
+             resource.atomic64);
+    }
+    // A missing PS5 shadow map still needs a depth-compatible image view.
+    // Keep ordinary float/color and atomic64 null images unchanged.
+	desc.info.pixel_format    = policy.image_format;
 	desc.info.type            = Prospero::ImageType::kColor2D;
 	desc.info.extent          = {1, 1, 1};
 	desc.info.resources       = {1, 1};
 	desc.info.bytes_per_block = Prospero::NumBytesPerElement(desc.info.guest_format);
 	desc.info.samples         = 1;
 	desc.info.mip_layout[0]   = {0, 0, 1, 1};
-	desc.view_info.format     = resource.atomic64 ? vk::Format::eR64Uint : desc.info.pixel_format;
+	desc.view_info.format     = policy.view_format;
 	desc.view_info.type       = vk::ImageViewType::e2D;
-	desc.view_info.aspect     = vk::ImageAspectFlagBits::eColor;
+	desc.view_info.aspect     = policy.aspect;
 	desc.view_info.usage      = binding == TextureCache::BindingType::Storage
 	                                ? vk::ImageUsageFlagBits::eStorage
 	                                : vk::ImageUsageFlagBits::eSampled;
