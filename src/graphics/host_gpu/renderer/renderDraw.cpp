@@ -37,6 +37,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -768,10 +769,39 @@ static PreparedVertexBuffers AcquireVertexBuffers(CommandBuffer&               b
 	return prepared;
 }
 
+// A compact reproducible shader identity (never a guest code address or
+// shader binary) helps compare the last GPU draws across Syberia runs.
+static uint32_t DrawShaderFingerprint(const DrawRenderState& state) {
+    static const bool probe = [] {
+        const char* value = std::getenv("XXII_COMPAT_PROBE");
+        return value && value[0] == '1' && value[1] == '\0';
+    }();
+    if (!probe) return 0;
+    uint64_t hash = 1469598103934665603ull;
+    uint32_t stages = 0;
+    const auto mix = [&](uint64_t value) {
+        hash ^= value;
+        hash *= 1099511628211ull;
+    };
+    for (uint32_t i = 0; i < state.programs.VertexStageCount(); ++i) {
+        const auto* program = state.vertex_info[i].stage.program;
+        if (program) {
+            mix(program->shader_hash);
+            ++stages;
+        }
+    }
+    if (state.ps_active && state.ps_input_info.stage.program) {
+        mix(state.ps_input_info.stage.program->shader_hash);
+        ++stages;
+    }
+    if (stages == 0) return 0;
+    return static_cast<uint32_t>(hash ^ (hash >> 32));
+}
+
 static void SetDrawDebugPhase(CommandBuffer& buffer, uint64_t submit_id, const DrawCallInfo& draw,
-                              uint32_t phase) {
-	buffer.SetDebugInfo(static_cast<uint32_t>(draw.debug_op), submit_id, phase, draw.index_count, 0,
-	                    draw.instance_count, draw.first_instance);
+                              uint32_t phase, uint32_t shader_fingerprint) {
+	buffer.SetDebugInfo(static_cast<uint32_t>(draw.debug_op), submit_id, phase, draw.index_count,
+	                    shader_fingerprint, draw.instance_count, draw.first_instance);
 }
 
 static bool GetDrawTopology(const HW::UserConfig& ucfg, vk::PrimitiveTopology& topology) {
@@ -1171,12 +1201,14 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory.
 	auto vk_buffer = buffer.Handle();
-	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u);
+    const uint32_t shader_fingerprint = DrawShaderFingerprint(state);
+	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u,
+                      shader_fingerprint);
 	if (!mesh_active) {
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
 	}
 	if (state.ps_active && !draw.IsIndexed()) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
+		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u, shader_fingerprint);
 	}
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
 	if (mesh_active) {
@@ -1203,12 +1235,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 
 	LogDrawPhase(draw.Name(), "BeginRendering");
 	if (!draw.IsIndexed()) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u);
+		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u, shader_fingerprint);
 	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 	if (!draw.IsIndexed()) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
+		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u, shader_fingerprint);
 	}
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
@@ -1217,7 +1249,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 
 	if (!draw.IsIndexed()) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u);
+		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u, shader_fingerprint);
 	}
 	vk::PipelineStageFlags shader_write_stages = {};
 	for (const auto& stage: vertex_stages) {
@@ -1234,7 +1266,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	LogDrawPhase(draw.Name(), "DrawComplete");
 	if (!draw.IsIndexed()) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
+		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u, shader_fingerprint);
 	}
 }
 
