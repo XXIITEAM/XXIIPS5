@@ -33,6 +33,8 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <limits>
 #include <span>
@@ -1124,6 +1126,41 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			for (uint32_t mip = 0; mip < resource.mip_count; ++mip) {
 				m_descriptor_images[start + mip] = MakeImageInfo(texture, mip);
 			}
+            // Binding 24 in a compute pipeline is a floating depth-compare
+            // sampled 2D texture. Vulkan VUID-06479 reports R32_SFLOAT
+            // there; retain bounded format metadata of the *actual* image
+            // view, not just the expected guest descriptor format.
+            static const bool probe = std::getenv("XXII_COMPAT_PROBE") != nullptr;
+            if (probe && resource.depth_compare &&
+                ShaderRecompiler::IR::NativeBinding(program.stage, kind) == 24u &&
+                resource.descriptor_index == 0 && resource.mip_count != 0) {
+                const auto& cached = m_context.GetTextureCache().GetImage(texture.image_id);
+                const auto vk_view = m_descriptor_images[start].imageView;
+                const auto it = std::ranges::find(cached.views, vk_view, &CachedImageView::view);
+                const auto view_format = it == cached.views.end() ? vk::Format::eUndefined
+                                                                   : it->info.format;
+                const bool invalid = !cached.info.IsDepth() ||
+                                     view_format == vk::Format::eR32Sfloat;
+                static std::atomic<uint32_t> bad_count {0};
+                static std::atomic<uint32_t> ok_count {0};
+                const auto sequence = (invalid ? bad_count : ok_count)
+                                          .fetch_add(1, std::memory_order_relaxed);
+                if (sequence < (invalid ? 20u : 4u)) {
+                    std::fprintf(stderr,
+                        "XXII_DEPTH_BINDING_DIAG stage=%u binding=24 index=%u bad=%d"
+                        " compare=%d guest_format=%u requested=%d requested_view=%d"
+                        " cached_format=%d backing_format=%d actual_view=%d null=%d\n",
+                        static_cast<uint32_t>(program.stage), resource.descriptor_index,
+                        invalid ? 1 : 0, resource.depth_compare ? 1 : 0,
+                        static_cast<uint32_t>(texture.desc.info.guest_format),
+                        static_cast<int>(texture.desc.info.pixel_format),
+                        static_cast<int>(texture.desc.view_info.format),
+                        static_cast<int>(cached.info.pixel_format),
+                        static_cast<int>(cached.backing.format), static_cast<int>(view_format),
+                        cached.info.data.Empty() ? 1 : 0);
+                    std::fflush(stderr);
+                }
+            }
 		}
 
 		const auto shader_data_dwords = program.bindings.ShaderDataDwords();
