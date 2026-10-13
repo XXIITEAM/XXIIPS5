@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <memory>
@@ -747,6 +748,14 @@ static void VulkanGetExtensions(VulkanExtensions& r) {
 			r.enable_validation_layers = false;
 		}
 	}
+    // Communicate whether validation actually activated. Requesting it is
+    // not proof: SDK layers may be absent from the CI machine.
+    if (std::getenv("XXII_COMPAT_PROBE")) {
+        const bool requested = Config::VulkanValidationEnabled();
+        std::fprintf(stderr, "XXII_VK_VALIDATION requested=%d enabled=%d\n",
+                     requested ? 1 : 0, r.enable_validation_layers ? 1 : 0);
+        std::fflush(stderr);
+    }
 }
 
 static VKAPI_ATTR vk::Bool32 VKAPI_CALL VulkanDebugMessengerCallback(
@@ -796,6 +805,17 @@ static VKAPI_ATTR vk::Bool32 VKAPI_CALL VulkanDebugMessengerCallback(
 	}
 
 	if (error) {
+        // Preserve only the Vulkan validation ID/code for CI analysis. The
+        // full validation text could contain guest-specific memory addresses
+        // or filesystem paths; leave it in the private local log.
+        if (std::getenv("XXII_COMPAT_PROBE")) {
+            const char* name = callback_data->pMessageIdName
+                                   ? callback_data->pMessageIdName : "unnamed";
+            std::fprintf(stderr, "XXII_VK_VALIDATION_ERROR number=%d type=%u id=%.120s\n",
+                         callback_data->messageIdNumber,
+                         static_cast<uint32_t>(message_types), name);
+            std::fflush(stderr);
+        }
 		EXIT_COLOR(severity_style, "[Vulkan][%s][%u]: %s\n", severity_str,
 		           static_cast<uint32_t>(message_types), callback_data->pMessage);
 	}
