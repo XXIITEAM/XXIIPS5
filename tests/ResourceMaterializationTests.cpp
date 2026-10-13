@@ -793,6 +793,51 @@ void TestFiniteImageRefreshReusesScalarReads() {
         "finite image refresh grew reusable resource storage after warmup");
 }
 
+void TestDepthComparisonSamplerDoesNotPoisonFloatSamples() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  // The guest reuses one sampler for depth-comparison and ordinary R32_FLOAT
+  // sampling. Vulkan cannot use a compare-enabled sampler against R32_SFLOAT.
+  auto program = MixedSamplerProgram();
+  const auto float_format =
+      static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32Float);
+  const auto image_type =
+      static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D);
+  for (const uint32_t source : {0u, 1u}) {
+    program.descriptor_sources[source].dwords[0] = Value(0x10000u + source * 0x10000u);
+    program.descriptor_sources[source].dwords[1] = Value(float_format << 20u);
+    program.descriptor_sources[source].dwords[3] = Value(image_type << 28u);
+  }
+  program.info.images[0].depth_compare = true;
+  program.info.images[1].depth_compare = false;
+  auto plan = ExtractResourcePlan(program);
+  std::array<uint32_t, 2> user_data{0x11111111u, 0x22222222u};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, {.user_data = user_data}, snapshot, specialization),
+        "shared float/depth sampler failed resource materialization");
+  ApplyResourceSpecialization(program, specialization);
+
+  const auto &samplers = program.info.samplers;
+  const auto &pairs = program.info.sampled_pairs;
+  Check(snapshot.samplers.size() == 2 && samplers.size() == 3 &&
+            samplers[0].snapshot_index == 0 &&
+            samplers[1].snapshot_index == 1 &&
+            samplers[2].snapshot_index == 1 &&
+            pairs[0].sampler == 0 && pairs[1].sampler == 2 &&
+            pairs[2].sampler == 1 &&
+            samplers[0].depth_compare && samplers[2].depth_compare &&
+            !samplers[1].depth_compare &&
+            !samplers[0].integer_border && !samplers[1].integer_border &&
+            !samplers[2].integer_border,
+        "depth comparison leaked into ordinary R32_FLOAT sampler binding");
+  user_data[1] = 0x33333333u;
+  Check(MaterializeResources(plan, {.user_data = user_data}, snapshot, specialization) &&
+            snapshot.samplers.size() == 2 &&
+            snapshot.samplers[samplers[1].snapshot_index].dwords[0] == user_data[1] &&
+            snapshot.samplers[samplers[2].snapshot_index].dwords[0] == user_data[1],
+        "split depth/color samplers lost their original runtime descriptor");
+}
+
 void TestMixedSamplerVariantsShareRuntimeDescriptor() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   auto program = MixedSamplerProgram();
@@ -854,6 +899,7 @@ int main() {
   TestSharedControlPredicates();
   TestFiniteImageRefreshReusesScalarReads();
   TestMixedSamplerVariantsShareRuntimeDescriptor();
+  TestDepthComparisonSamplerDoesNotPoisonFloatSamples();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

@@ -106,9 +106,13 @@ Prospero::BufferFormat ImageConversionFormat(Prospero::BufferFormat format) {
 	                                                      : Prospero::BufferFormat::kInvalid;
 }
 
-enum class SamplerClass : uint8_t { Float, Integer, PointInteger };
+// Vulkan comparison samplers may only be used with depth-comparison-capable
+// image formats. A guest sampler reused for color and depth lookups must have
+// separate descriptor variants even when both images are floating point.
+enum class SamplerClass : uint8_t { Float, Integer, PointInteger, DepthCompare };
 
 SamplerClass ClassifySampler(const ImageResource& image) {
+    if (image.depth_compare) return SamplerClass::DepthCompare;
 	if (image.numeric_class == Prospero::TextureNumericClass::Sint ||
 	    (image.numeric_class == Prospero::TextureNumericClass::Uint &&
 	     image.conversion_format != Prospero::BufferFormat::kInvalid)) {
@@ -433,7 +437,7 @@ struct SamplerPlan {
 		uint32_t     source;
 		SamplerClass type;
 	};
-	std::array<std::array<uint32_t, 3>, ShaderInfo::MaxSamplers> mapping;
+	std::array<std::array<uint32_t, 4>, ShaderInfo::MaxSamplers> mapping;
 	std::array<Binding, ShaderInfo::MaxSamplers>                bindings;
 	uint32_t                                                  sampler_count = 0;
 };
@@ -1308,7 +1312,11 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		}
 		samplers[index].snapshot_index = binding.source;
 		samplers[index].force_point_filtering = binding.type == SamplerClass::PointInteger;
-		samplers[index].integer_border        = binding.type != SamplerClass::Float;
+        samplers[index].integer_border = binding.type == SamplerClass::Integer ||
+                                         binding.type == SamplerClass::PointInteger;
+        // Do not allow a depth compare use to poison a color sample sharing
+        // the same original guest sampler descriptor.
+        samplers[index].depth_compare = binding.type == SamplerClass::DepthCompare;
 	}
 	for (uint32_t index = 0; index < sampler_plan.sampler_count; index++) {
 		const auto& binding = sampler_plan.bindings[index];
