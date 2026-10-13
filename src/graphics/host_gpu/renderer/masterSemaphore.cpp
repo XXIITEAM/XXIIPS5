@@ -62,6 +62,61 @@ void MasterSemaphore::RecordSubmission(uint64_t tick, uint32_t operation,
     m_traceCount = std::min(m_traceCount + 1, TraceCapacity);
 }
 
+void MasterSemaphore::DumpDeviceFault() const {
+    if (!m_graphics.device_fault_ext_enabled || m_graphics.device == nullptr) return;
+    // After VK_ERROR_DEVICE_LOST only: query limited numeric diagnostics.
+    // Never extract vendor crash binaries or print GPU virtual addresses.
+    const VkDevice device = static_cast<VkDevice>(m_graphics.device);
+    const auto get_fault = reinterpret_cast<PFN_vkGetDeviceFaultInfoEXT>(
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(device, "vkGetDeviceFaultInfoEXT"));
+    if (!get_fault) {
+        std::fprintf(stderr, "XXII_DEVICE_FAULT_INFO unavailable=missing_entrypoint\n");
+        return;
+    }
+
+    VkDeviceFaultCountsEXT counts {};
+    counts.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT;
+    VkResult result = get_fault(device, &counts, nullptr);
+    if (result != VK_SUCCESS) {
+        std::fprintf(stderr, "XXII_DEVICE_FAULT_INFO query_result=%d\n", int(result));
+        std::fflush(stderr);
+        return;
+    }
+
+    constexpr uint32_t max_faults = 8;
+    std::array<VkDeviceFaultAddressInfoEXT, max_faults> addresses {};
+    std::array<VkDeviceFaultVendorInfoEXT, max_faults> vendors {};
+    const uint32_t addresses_to_query = std::min(counts.addressInfoCount, max_faults);
+    const uint32_t vendors_to_query = std::min(counts.vendorInfoCount, max_faults);
+    const auto vendor_binary_size = counts.vendorBinarySize;
+    counts.addressInfoCount = addresses_to_query;
+    counts.vendorInfoCount = vendors_to_query;
+    counts.vendorBinarySize = 0; // No binary driver crash dumps are requested.
+    VkDeviceFaultInfoEXT info {};
+    info.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT;
+    info.pAddressInfos = addresses_to_query ? addresses.data() : nullptr;
+    info.pVendorInfos = vendors_to_query ? vendors.data() : nullptr;
+    result = get_fault(device, &counts, &info);
+    std::fprintf(stderr,
+        "XXII_DEVICE_FAULT_INFO result=%d addresses=%u vendors=%u binary_available=%d\n",
+        int(result), counts.addressInfoCount, counts.vendorInfoCount,
+        vendor_binary_size > 0 ? 1 : 0);
+    if (result == VK_SUCCESS || result == VK_INCOMPLETE) {
+        for (uint32_t i = 0; i < std::min(counts.addressInfoCount, max_faults); ++i) {
+            std::fprintf(stderr,
+                "XXII_DEVICE_FAULT_ADDRESS index=%u type=%d precision=%" PRIu64 "\n",
+                i, int(addresses[i].addressType),
+                static_cast<uint64_t>(addresses[i].addressPrecision));
+        }
+        for (uint32_t i = 0; i < std::min(counts.vendorInfoCount, max_faults); ++i) {
+            std::fprintf(stderr,
+                "XXII_DEVICE_FAULT_VENDOR index=%u code=%" PRIu64 "\n",
+                i, static_cast<uint64_t>(vendors[i].vendorFaultCode));
+        }
+    }
+    std::fflush(stderr);
+}
+
 void MasterSemaphore::DumpRecentSubmissions() const {
     if (!m_traceEnabled) return;
     std::array<SubmittedOperation, TraceCapacity> snapshot {};
@@ -96,6 +151,7 @@ void MasterSemaphore::Refresh() {
 	const auto result  = m_graphics.device.getSemaphoreCounterValue(m_semaphore, &counter);
     if (result != vk::Result::eSuccess) {
         ReportSemaphoreError("getCounter", result, 0, CurrentTick(), KnownGpuTick());
+        if (result == vk::Result::eErrorDeviceLost) DumpDeviceFault();
         DumpRecentSubmissions();
     }
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
@@ -124,6 +180,7 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
     if (result != vk::Result::eSuccess) {
         ReportSemaphoreError("wait", result, tick, CurrentTick(), KnownGpuTick());
+        if (result == vk::Result::eErrorDeviceLost) DumpDeviceFault();
         DumpRecentSubmissions();
     }
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);

@@ -404,7 +404,10 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		                  m_command.m_debug_arg1, m_command.m_debug_arg2, m_command.m_debug_arg3,
 		                  m_command.m_debug_arg4);
 	}
-    if (result != vk::Result::eSuccess) m_master.DumpRecentSubmissions();
+    if (result != vk::Result::eSuccess) {
+        if (result == vk::Result::eErrorDeviceLost) m_master.DumpDeviceFault();
+        m_master.DumpRecentSubmissions();
+    }
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
     m_master.RecordSubmission(tick, m_command.m_debug_op, m_command.m_debug_submit_id,

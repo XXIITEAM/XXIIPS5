@@ -493,7 +493,20 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		image_atomic_int64.pNext = supported_features2.pNext;
 		supported_features2.pNext = &image_atomic_int64;
 	}
+    // Device-fault diagnostics are opt-in and must not alter ordinary games.
+    const bool fault_extension = HasExtension(device_extensions, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+    vk::PhysicalDeviceFaultFeaturesEXT supported_fault {};
+    if (fault_extension) {
+        supported_fault.pNext = supported_features2.pNext;
+        supported_features2.pNext = &supported_fault;
+    }
 	physical_device.getFeatures2(&supported_features2);
+    graphics.device_fault_ext_enabled = fault_extension && supported_fault.deviceFault == VK_TRUE;
+    if (std::getenv("XXII_COMPAT_PROBE")) {
+        std::fprintf(stderr, "XXII_DEVICE_FAULT_SUPPORT ext=%d feature=%d\n",
+                     fault_extension ? 1 : 0, graphics.device_fault_ext_enabled ? 1 : 0);
+        std::fflush(stderr);
+    }
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
 
 	auto features12 = WindowContext::RequiredVulkan12Features();
@@ -653,6 +666,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		maintenance8.pNext = const_cast<void*>(create_info.pNext);
 		create_info.pNext = &maintenance8;
 	}
+    vk::PhysicalDeviceFaultFeaturesEXT enable_fault {};
+    if (graphics.device_fault_ext_enabled) {
+        enable_fault.deviceFault = VK_TRUE;
+        enable_fault.deviceFaultVendorBinary = VK_FALSE;
+        enable_fault.pNext = create_info.pNext;
+        create_info.pNext = &enable_fault;
+    }
 	create_info.pQueueCreateInfos       = &queue_create_info;
 	create_info.queueCreateInfoCount    = 1;
 	create_info.enabledExtensionCount   = static_cast<uint32_t>(device_extensions.size());
@@ -1040,6 +1060,11 @@ void WindowContext::CreateVulkan() {
 			device_extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 			graphic_ctx.memory_budget_ext_enabled = true;
 		}
+        const char* probe = std::getenv("XXII_COMPAT_PROBE");
+        if (probe && strcmp(probe, "1") == 0 &&
+            HasExtension(available_extensions, VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
+            device_extensions.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+        }
 		for (const auto* extension: {VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
 		                             VK_KHR_MAINTENANCE_8_EXTENSION_NAME,
 		                             VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME,

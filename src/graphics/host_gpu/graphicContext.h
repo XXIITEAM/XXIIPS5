@@ -27,6 +27,9 @@ struct GraphicContext {
 	vk::Device                         device                                = nullptr;
 	VmaAllocator                       allocator                             = nullptr;
 	bool                               memory_budget_ext_enabled             = false;
+    // Enabled only for explicit PS5 compatibility diagnostics when supported.
+    // Allows querying Vulkan's structured fault metadata after device loss.
+    bool                               device_fault_ext_enabled            = false;
 	bool                               compute_subgroup_size_control_enabled = false;
 	bool                               sample_rate_shading_enabled           = false;
 	bool                               shader_image_int64_atomics_enabled    = false;

@@ -38,6 +38,7 @@ public:
     void RecordSubmission(uint64_t tick, uint32_t operation, uint64_t submitId,
                           uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint64_t e);
     void DumpRecentSubmissions() const;
+    void DumpDeviceFault() const;
 
 private:
 	GraphicContext&       m_graphics;
