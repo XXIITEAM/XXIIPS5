@@ -358,6 +358,10 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			if (kind != ResourceKind::Lds && kind != ResourceKind::Gds) {
 				return Fail("shared operation has invalid resource kind");
 			}
+			// Discover LDS atomics before SPIR-V emission. Mixed ordinary
+			// loads/stores to the same workgroup dwords must also be atomic.
+			info.shared_atomics |= kind == ResourceKind::Lds &&
+			                       shared_access == SharedAccess::Atomic;
 			if (shared_access == SharedAccess::Atomic && SharedComponentCount(op) == 2u) {
 				if (kind != ResourceKind::Lds || program.stage != ShaderType::Compute) {
 					return Fail("64-bit shared atomics require compute LDS");
@@ -570,7 +574,8 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 	info.bvh = info.subgroup_ballot = info.subgroup_barrier = info.subgroup_shuffle =
 	    info.subgroup_local_invocation_id = info.compute_derivatives = info.image_gather_extended =
 	    info.function_lds = info.function_scratch = info.pixel_valid_mask = info.buffer_int64_atomics =
-	    info.buffer_u8 = info.buffer_u16 = info.shared_int64_atomics = info.coherent_buffers = info.float64 = false;
+	    info.buffer_u8 = info.buffer_u16 = info.shared_atomics =
+	    info.shared_int64_atomics = info.coherent_buffers = info.float64 = false;
 	InputUsage inputs;
 	for (const auto* block: program.blocks) {
 		for (const auto& inst: *block) {

@@ -318,15 +318,36 @@ uint32_t LoadSubwordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const 
 	    });
 }
 
-uint32_t LoadWordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& resource,
-                          uint32_t index) {
-	const auto value   = ctx.state.builder.AllocateId();
-	const auto pointer = EmitMemoryElementPointer(ctx.state, resource, index);
-	ctx.state.builder.AddFunction(spv::OpLoad, TypeU32(ctx.state), value, pointer,
-	                              resource.memory_access);
-	return value;
+// LDS shaders with atomics cannot emit ordinary OpLoad/OpStore to aliased
+// workgroup dwords: Vulkan GPU-Assisted Validation reports a data race.
+// Preserve the fast path for shaders that never use LDS atomics.
+bool AtomicLdsAccess(const ValueEmitContext& ctx, const MemoryResourceAccess& resource) {
+	return resource.kind == IR::ResourceKind::Lds && ctx.state.program.info.shared_atomics;
 }
 
+uint32_t LdsAtomicSemantics(const EmitterState& state, uint32_t ordering) {
+	return ordering |
+	       (state.lds_storage_class == spv::StorageClassStorageBuffer
+	            ? spv::MemorySemanticsUniformMemoryMask
+	            : spv::MemorySemanticsWorkgroupMemoryMask);
+}
+
+uint32_t LoadWordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& resource,
+                          uint32_t index) {
+	auto& state = ctx.state;
+	const auto value = state.builder.AllocateId();
+	const auto pointer = EmitMemoryElementPointer(state, resource, index);
+	if (AtomicLdsAccess(ctx, resource)) {
+		state.builder.AddFunction(spv::OpAtomicLoad, TypeU32(state), value, pointer,
+		                          ConstantU32(state, spv::ScopeWorkgroup),
+		                          ConstantU32(state, LdsAtomicSemantics(
+		                              state, spv::MemorySemanticsAcquireMask)));
+	} else {
+		state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, pointer,
+		                          resource.memory_access);
+	}
+	return value;
+}
 uint32_t LoadSubwordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& resource,
                              uint32_t address, uint32_t index, uint32_t bits, bool sign_extend) {
 	uint32_t value;
@@ -489,11 +510,20 @@ void StoreSubword(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo me
 
 void StoreWordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& resource, uint32_t index,
                        uint32_t data) {
-	ctx.state.builder.AddFunction(spv::OpStore,
-	                              EmitMemoryElementPointer(ctx.state, resource, index), data,
-	                              resource.memory_access);
+	auto& state = ctx.state;
+	const auto pointer = EmitMemoryElementPointer(state, resource, index);
+	if (AtomicLdsAccess(ctx, resource)) {
+		// The old value is intentionally discarded; a word store becomes an
+		// atomic exchange when another invocation may use an LDS atomic.
+		state.builder.AddFunction(spv::OpAtomicExchange, TypeU32(state),
+		                          state.builder.AllocateId(), pointer,
+		                          ConstantU32(state, spv::ScopeWorkgroup),
+		                          ConstantU32(state, LdsAtomicSemantics(
+		                              state, spv::MemorySemanticsAcquireReleaseMask)), data);
+	} else {
+		state.builder.AddFunction(spv::OpStore, pointer, data, resource.memory_access);
+	}
 }
-
 template <typename Fn>
 void ForEachLocalFlatAccess(ValueEmitContext& ctx, const IR::Inst& inst, Fn&& emit) {
 	auto& state = ctx.state;

@@ -491,6 +491,8 @@ struct ShaderInfo {
 	bool                            buffer_int64_atomics          = false;
 	bool                            buffer_u8                     = false;
 	bool                            buffer_u16                    = false;
+	// Mixed LDS atomic/plain accesses must use compatible SPIR-V atomics.
+	bool                            shared_atomics                = false;
 	bool                            shared_int64_atomics          = false;
 	bool                            coherent_buffers              = false;
 	bool                            float64                       = false;
