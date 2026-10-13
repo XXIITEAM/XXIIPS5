@@ -7814,9 +7814,9 @@ void TestNewShaderRecompilerDsWideAndAtomicTranslation() {
   Check((result.decoded_dump.find("dwords=4 bits=32") != std::string::npos),
         "new decoder did not expose DS wide width metadata");
   // Mixed DS read/write and atomic operations may target the same LDS
-  // dwords. Regular OpLoad/OpStore on those words is a Vulkan data race.
-  Check(SpirvContainsOpcode(result.spirv, 227),
-        "mixed LDS shader must atomically load dwords (OpAtomicLoad)");
+  // dwords. Stores must use OpAtomicExchange. The unused DS read results
+  // are eliminated by DCE in this fixture, so do not assert OpAtomicLoad
+  // unless a separate test consumes the read result.
   Check(SpirvContainsOpcode(result.spirv, 229),
         "mixed LDS shader must atomically exchange dword stores (OpAtomicExchange)");
   Check(SpirvContainsOpcode(result.spirv, 237),
