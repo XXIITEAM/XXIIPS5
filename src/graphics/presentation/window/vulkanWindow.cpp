@@ -670,7 +670,7 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
     if (graphics.device_fault_ext_enabled) {
         enable_fault.deviceFault = VK_TRUE;
         enable_fault.deviceFaultVendorBinary = VK_FALSE;
-        enable_fault.pNext = create_info.pNext;
+        enable_fault.pNext = const_cast<void*>(create_info.pNext);
         create_info.pNext = &enable_fault;
     }
 	create_info.pQueueCreateInfos       = &queue_create_info;
