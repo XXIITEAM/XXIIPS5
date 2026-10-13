@@ -1226,6 +1226,49 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
                      state.depth_info.depth_test_enable ? 1 : 0,
                      state.depth_info.depth_write_enable ? 1 : 0,
                      state.depth_info.stencil_test_enable ? 1 : 0);
+        // Read-only, bounded resource classification of exactly one watched
+        // draw pipeline. Descriptor shapes only; no backing guest pointers,
+        // shader binaries, image pixels or proprietary render-target contents.
+        const auto report_resources = [](const char* stage_name, uint32_t stage_index,
+                                         const auto& stage) {
+            const auto* shader = stage.program;
+            if (!shader || !stage.resources) return;
+            const auto& resources = *stage.resources;
+            const auto& info = shader->info;
+            std::fprintf(stderr,
+                         "XXII_SHADER_META kind=draw_resources stage=%s index=%u"
+                         " buffers=%zu/%zu images=%zu/%zu samplers=%zu\n",
+                         stage_name, stage_index, resources.buffers.size(), info.buffers.size(),
+                         resources.images.size(), info.images.size(), info.samplers.size());
+            for (size_t n = 0; n < std::min<size_t>(
+                     8, std::min(resources.buffers.size(), info.buffers.size())); ++n) {
+                const auto descriptor =
+                    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[n]);
+                std::fprintf(stderr, "XXII_SHADER_META kind=draw_buffer stage=%s"
+                                     " index=%zu written=%d stride=%u records=%u format=%u\n",
+                             stage_name, n, info.buffers[n].written ? 1 : 0,
+                             descriptor.Stride(), descriptor.NumRecords(),
+                             static_cast<uint32_t>(descriptor.RawFormat()));
+            }
+            for (size_t n = 0; n < std::min<size_t>(
+                     8, std::min(resources.images.size(), info.images.size())); ++n) {
+                const auto descriptor =
+                    DecodeNativeDescriptor<ShaderTextureResource>(resources.images[n]);
+                std::fprintf(stderr, "XXII_SHADER_META kind=draw_image stage=%s"
+                                     " index=%zu class=%u written=%d null=%d"
+                                     " type=%u format=%u extent=%u,%u,%u\n",
+                             stage_name, n, static_cast<uint32_t>(info.images[n].resource_class),
+                             info.images[n].written ? 1 : 0, descriptor.IsNull() ? 1 : 0,
+                             static_cast<uint32_t>(descriptor.Type()),
+                             static_cast<uint32_t>(descriptor.Format()),
+                             descriptor.Width5() + 1u, descriptor.Height5() + 1u,
+                             descriptor.Depth() + 1u);
+            }
+        };
+        for (uint32_t i = 0; i < state.programs.VertexStageCount(); ++i) {
+            report_resources("vertex", i, state.vertex_info[i].stage);
+        }
+        if (state.ps_active) report_resources("pixel", 0, state.ps_input_info.stage);
         for (uint32_t i = 0; i < state.programs.VertexStageCount(); ++i) {
             const auto* shader = state.vertex_info[i].stage.program;
             if (!shader) continue;
