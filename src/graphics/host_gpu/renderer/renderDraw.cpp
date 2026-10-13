@@ -1326,14 +1326,35 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+    // Two GPU *execution* checkpoints bracketing the recurring 600-index
+    // Syberia draw. Only one watched fingerprint, on an opt-in diagnostics
+    // device with VK_NV_device_diagnostic_checkpoints; no draw is skipped.
+    // The high A5 tag distinguishes these from scheduler-tail markers.
+    const auto draw_checkpoint = [&](uint64_t phase) {
+        if (!draw.IsIndexed() || draw.index_count != 600 ||
+            watched_fingerprint == 0 || shader_fingerprint != watched_fingerprint ||
+            !m_context.GetGraphics().device_checkpoints_enabled) return;
+        const auto& graphics = m_context.GetGraphics();
+        const auto insert = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(
+                static_cast<VkDevice>(graphics.device), "vkCmdSetCheckpointNV"));
+        if (!insert) return;
+        constexpr uint64_t DrawTag = UINT64_C(0xA500000000000000);
+        constexpr uint64_t SubmitMask = (UINT64_C(1) << 55) - 1;
+        const uint64_t marker = DrawTag | ((submit_id & SubmitMask) << 1) | phase;
+        insert(static_cast<VkCommandBuffer>(vk_buffer),
+               reinterpret_cast<const void*>(static_cast<uintptr_t>(marker)));
+    };
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u, shader_fingerprint);
 	}
+    draw_checkpoint(0); // checkpoint immediately before the actual indexed draw
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
+    draw_checkpoint(1); // checkpoint immediately after the draw command
 
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u, shader_fingerprint);

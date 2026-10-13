@@ -172,9 +172,21 @@ void MasterSemaphore::DumpCheckpoints() const {
     for (uint32_t i = 0; i < count; ++i) {
         const uint64_t marker = static_cast<uint64_t>(
             reinterpret_cast<uintptr_t>(checkpoints[i].pCheckpointMarker));
-        std::fprintf(stderr,
-                     "XXII_GPU_CHECKPOINT stage=%u marker=%" PRIu64 "\n",
-                     static_cast<unsigned>(checkpoints[i].stage), marker);
+        constexpr uint64_t DrawTag = UINT64_C(0xA500000000000000);
+        constexpr uint64_t SubmitMask = (UINT64_C(1) << 55) - 1;
+        if ((marker & UINT64_C(0xFF00000000000000)) == DrawTag) {
+            std::fprintf(stderr,
+                         "XXII_GPU_CHECKPOINT stage=%u marker=%" PRIu64
+                         " kind=watched_indexed_draw phase=%s submit=%" PRIu64 "\n",
+                         static_cast<unsigned>(checkpoints[i].stage), marker,
+                         (marker & 1) ? "after" : "before",
+                         (marker >> 1) & SubmitMask);
+        } else {
+            std::fprintf(stderr,
+                         "XXII_GPU_CHECKPOINT stage=%u marker=%" PRIu64
+                         " kind=command_buffer_tail\n",
+                         static_cast<unsigned>(checkpoints[i].stage), marker);
+        }
     }
     std::fflush(stderr);
 }
