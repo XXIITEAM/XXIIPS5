@@ -72,10 +72,12 @@ MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics)
 
 void MasterSemaphore::RecordSubmission(uint64_t tick, uint32_t operation,
                                        uint64_t submitId, uint32_t a, uint32_t b,
-                                       uint32_t c, uint32_t d, uint64_t e) {
+                                       uint32_t c, uint32_t d, uint64_t e,
+                                       uint64_t checkpoint_marker) {
     if (!m_traceEnabled) return;
     std::lock_guard guard(m_traceMutex);
-    m_trace[m_traceHead] = {tick, operation, submitId, a, b, c, d, e};
+    m_trace[m_traceHead] = {tick, operation, submitId, a, b, c, d, e,
+                            checkpoint_marker};
     m_traceHead = (m_traceHead + 1) % TraceCapacity;
     m_traceCount = std::min(m_traceCount + 1, TraceCapacity);
 }
@@ -140,6 +142,43 @@ void MasterSemaphore::DumpDeviceFault() const {
     std::fflush(stderr);
 }
 
+void MasterSemaphore::DumpCheckpoints() const {
+    // vkGetQueueCheckpointDataNV is valid only after VK_ERROR_DEVICE_LOST.
+    // Callers enforce that condition. Markers are opaque numeric IDs assigned
+    // by the scheduler, never raw guest pointers or GPU virtual addresses.
+    if (!m_graphics.device_checkpoints_enabled ||
+        m_graphics.device == nullptr || m_graphics.queue == nullptr) return;
+    const VkDevice device = static_cast<VkDevice>(m_graphics.device);
+    const auto get_checkpoints = reinterpret_cast<PFN_vkGetQueueCheckpointDataNV>(
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(
+            device, "vkGetQueueCheckpointDataNV"));
+    if (!get_checkpoints) {
+        std::fprintf(stderr, "XXII_GPU_CHECKPOINT unavailable=entrypoint\n");
+        std::fflush(stderr);
+        return;
+    }
+    const VkQueue queue = static_cast<VkQueue>(m_graphics.queue);
+    uint32_t available = 0;
+    get_checkpoints(queue, &available, nullptr);
+    constexpr uint32_t limit = 16;
+    std::array<VkCheckpointDataNV, limit> checkpoints {};
+    uint32_t count = std::min(available, limit);
+    for (uint32_t i = 0; i < count; ++i)
+        checkpoints[i].sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV;
+    if (count != 0) get_checkpoints(queue, &count, checkpoints.data());
+    count = std::min(count, limit);
+    std::fprintf(stderr, "XXII_GPU_CHECKPOINT_COUNT available=%u recorded=%u\n",
+                 available, count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint64_t marker = static_cast<uint64_t>(
+            reinterpret_cast<uintptr_t>(checkpoints[i].pCheckpointMarker));
+        std::fprintf(stderr,
+                     "XXII_GPU_CHECKPOINT stage=%u marker=%" PRIu64 "\n",
+                     static_cast<unsigned>(checkpoints[i].stage), marker);
+    }
+    std::fflush(stderr);
+}
+
 void MasterSemaphore::DumpRecentSubmissions() const {
     if (!m_traceEnabled) return;
     std::array<SubmittedOperation, TraceCapacity> snapshot {};
@@ -156,9 +195,11 @@ void MasterSemaphore::DumpRecentSubmissions() const {
         const auto& op = snapshot[i];
         std::fprintf(stderr,
                      "XXII_GPU_BREADCRUMB tick=%" PRIu64 " operation=%u submit=%" PRIu64
-                     " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
+                     " args=%u,%u,%u,%u,0x%016" PRIx64
+                     " checkpoint=%" PRIu64 "\n",
                      op.tick, op.operation, op.submitId,
-                     op.arg0, op.arg1, op.arg2, op.arg3, op.arg4);
+                     op.arg0, op.arg1, op.arg2, op.arg3, op.arg4,
+                     op.checkpoint_marker);
     }
     std::fflush(stderr);
 }
@@ -174,7 +215,10 @@ void MasterSemaphore::Refresh() {
 	const auto result  = m_graphics.device.getSemaphoreCounterValue(m_semaphore, &counter);
     if (result != vk::Result::eSuccess) {
         ReportSemaphoreError("getCounter", result, 0, CurrentTick(), KnownGpuTick());
-        if (result == vk::Result::eErrorDeviceLost) DumpDeviceFault();
+        if (result == vk::Result::eErrorDeviceLost) {
+            DumpDeviceFault();
+            DumpCheckpoints();
+        }
         DumpRecentSubmissions();
     }
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
@@ -203,7 +247,10 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
     if (result != vk::Result::eSuccess) {
         ReportSemaphoreError("wait", result, tick, CurrentTick(), KnownGpuTick());
-        if (result == vk::Result::eErrorDeviceLost) DumpDeviceFault();
+        if (result == vk::Result::eErrorDeviceLost) {
+            DumpDeviceFault();
+            DumpCheckpoints();
+        }
         DumpRecentSubmissions();
     }
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);

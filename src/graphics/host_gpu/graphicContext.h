@@ -30,6 +30,8 @@ struct GraphicContext {
     // Enabled only for explicit PS5 compatibility diagnostics when supported.
     // Allows querying Vulkan's structured fault metadata after device loss.
     bool                               device_fault_ext_enabled            = false;
+    // NV diagnostic checkpoints are optional and active only in CI probes.
+    bool                               device_checkpoints_enabled          = false;
 	bool                               compute_subgroup_size_control_enabled = false;
 	bool                               sample_rate_shading_enabled           = false;
 	bool                               shader_image_int64_atomics_enabled    = false;

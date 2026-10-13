@@ -1071,6 +1071,19 @@ void WindowContext::CreateVulkan() {
             HasExtension(available_extensions, VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
             device_extensions.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         }
+        // In diagnostic runs only, NVIDIA checkpoint markers can report
+        // GPU pipeline progress *after* a device-loss error.
+        graphic_ctx.device_checkpoints_enabled =
+            probe && strcmp(probe, "1") == 0 &&
+            HasExtension(available_extensions, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        if (graphic_ctx.device_checkpoints_enabled) {
+            device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        }
+        if (probe) {
+            std::fprintf(stderr, "XXII_GPU_CHECKPOINT_SUPPORT enabled=%d\n",
+                         graphic_ctx.device_checkpoints_enabled ? 1 : 0);
+            std::fflush(stderr);
+        }
 		for (const auto* extension: {VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
 		                             VK_KHR_MAINTENANCE_8_EXTENSION_NAME,
 		                             VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME,

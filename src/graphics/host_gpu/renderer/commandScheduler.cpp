@@ -367,9 +367,24 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 
+    // Each command buffer gets a monotonic opaque marker at its tail.
+    // The device extension and its entrypoint must both be available; the
+    // normal graphics path is unchanged when diagnostics are disabled.
+    uint64_t checkpoint_marker = 0;
+    auto& graphics = m_graphics;
+    if (graphics.device_checkpoints_enabled) {
+        const auto checkpoint = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(
+                static_cast<VkDevice>(graphics.device), "vkCmdSetCheckpointNV"));
+        if (checkpoint) {
+            checkpoint_marker = ++m_checkpoint_serial;
+            checkpoint(static_cast<VkCommandBuffer>(m_command.m_buffer),
+                       reinterpret_cast<const void*>(
+                           static_cast<uintptr_t>(checkpoint_marker)));
+        }
+    }
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
-	auto&      graphics = m_graphics;
 	EXIT_IF(graphics.queue == nullptr);
 
 	vk::Result result;
@@ -405,7 +420,10 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		                  m_command.m_debug_arg4);
 	}
     if (result != vk::Result::eSuccess) {
-        if (result == vk::Result::eErrorDeviceLost) m_master.DumpDeviceFault();
+        if (result == vk::Result::eErrorDeviceLost) {
+            m_master.DumpDeviceFault();
+            m_master.DumpCheckpoints();
+        }
         m_master.DumpRecentSubmissions();
     }
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
@@ -413,7 +431,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
     m_master.RecordSubmission(tick, m_command.m_debug_op, m_command.m_debug_submit_id,
                               m_command.m_debug_arg0, m_command.m_debug_arg1,
                               m_command.m_debug_arg2, m_command.m_debug_arg3,
-                              m_command.m_debug_arg4);
+                              m_command.m_debug_arg4, checkpoint_marker);
     const auto syncStart = ProbeSerializeAfterTick();
     if (syncStart != 0 && tick >= syncStart) {
         // The current submit was successful. A failing wait now reports the

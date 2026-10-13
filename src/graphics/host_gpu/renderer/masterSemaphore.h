@@ -36,9 +36,11 @@ public:
     // Runtime-disabled except during explicit compatibility probes. Retain
     // only numeric GPU operation metadata, never guest instructions/shaders.
     void RecordSubmission(uint64_t tick, uint32_t operation, uint64_t submitId,
-                          uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint64_t e);
+                          uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint64_t e,
+                          uint64_t checkpoint_marker);
     void DumpRecentSubmissions() const;
     void DumpDeviceFault() const;
+    void DumpCheckpoints() const;
 
 private:
 	GraphicContext&       m_graphics;
@@ -51,6 +53,7 @@ private:
         uint64_t submitId = 0;
         uint32_t arg0 = 0, arg1 = 0, arg2 = 0, arg3 = 0;
         uint64_t arg4 = 0;
+        uint64_t checkpoint_marker = 0;
     };
     static constexpr size_t TraceCapacity = 32;
     mutable std::mutex m_traceMutex;
