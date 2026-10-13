@@ -593,14 +593,14 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 
 	if (m_ehdr != nullptr /*&& m_self == nullptr*/) {
 		const auto file_size = m_f->Size();
-		// Program headers are mandatory and always range-checked. Unlike
-		// program headers, section headers are not needed by the ELF dynamic
+		// Any declared program headers are mandatory and always range-checked.
+		// A section-only/header-only ELF with no PT_DYNAMIC can be valid.
+		// Section headers are not needed by the ELF dynamic
 		// loader. Some lawful PS5 decrypted/repacked ELF64 images retain stale
 		// shoff/shnum values from their original container. Rejecting the whole
 		// file here prevents loading even when all PT_LOAD/PT_DYNAMIC entries
 		// are safely file-backed. Never weaken the program-header validation.
 		if (ehdr_pos > file_size ||
-		    m_ehdr->e_phnum == 0 ||
 		    !IsFileRangeValid(file_size - ehdr_pos, m_ehdr->e_phoff,
 		                      m_ehdr->e_phnum, sizeof(Elf64_Phdr))) {
 			LOGF("ELF: mandatory program header table is outside the file\n");
@@ -612,7 +612,8 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 		                      m_ehdr->e_shnum, sizeof(Elf64_Shdr))) {
 			// Accept this workaround only for a verified PS5 dynamic
 			// executable; non-PS5 and malformed program headers still fail.
-			if (m_ehdr->e_type != ET_DYNEXEC ||
+			if (m_ehdr->e_phnum == 0 ||
+			    m_ehdr->e_type != ET_DYNEXEC ||
 			    m_ehdr->e_ident[EI_OSABI] != ELFOSABI_FREEBSD) {
 				LOGF("ELF: section header table is outside the file\n");
 				Clear();

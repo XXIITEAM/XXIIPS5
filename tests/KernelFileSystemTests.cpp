@@ -230,6 +230,48 @@ void TestTruncatedElfTables(const std::filesystem::path& root) {
           "ELF without PT_DYNAMIC safely reports no dynamic imports");
   }
 
+  // Some decrypted PS5 ELF images contain a stale out-of-bounds
+  // SECTION table despite having valid program headers. The loader may
+  // ignore that optional table only for PS5 dynamic executables with a
+  // real, validated program-header table. Do not weaken the general ELF
+  // rejection policy (including the zero-phdr test above).
+  {
+    auto patched = header;
+    patched.e_phoff = sizeof(patched);
+    patched.e_phnum = 1;
+    patched.e_shoff = UINT64_MAX;
+    patched.e_shnum = 1;
+    patched.e_shentsize = sizeof(Loader::Elf64_Shdr);
+    Loader::Elf64_Phdr load {};
+    load.p_type = Loader::PT_LOAD;
+    load.p_offset = sizeof(patched) + sizeof(load);
+    load.p_filesz = 0;
+    load.p_memsz = 0;
+    {
+      std::ofstream file(path, std::ios::binary | std::ios::trunc);
+      file.write(reinterpret_cast<const char*>(&patched), sizeof(patched));
+      file.write(reinterpret_cast<const char*>(&load), sizeof(load));
+      Check(static_cast<bool>(file), "write PS5 stale optional sections fixture");
+    }
+    Loader::Elf64 recovered;
+    recovered.Open(path);
+    Check(recovered.IsValid() && recovered.GetEhdr() != nullptr &&
+          recovered.GetEhdr()->e_shnum == 0 && recovered.GetShdr() == nullptr,
+          "PS5 ELF with valid program headers tolerates stale optional sections");
+
+    // A non-PS5 ELF with the same corrupt section table must still fail.
+    patched.e_ident[Loader::EI_OSABI] = 0;
+    {
+      std::ofstream file(path, std::ios::binary | std::ios::trunc);
+      file.write(reinterpret_cast<const char*>(&patched), sizeof(patched));
+      file.write(reinterpret_cast<const char*>(&load), sizeof(load));
+      Check(static_cast<bool>(file), "write non-PS5 invalid sections fixture");
+    }
+    Loader::Elf64 untrusted;
+    untrusted.Open(path);
+    Check(!untrusted.IsValid(), "non-PS5 ELF with stale sections is rejected");
+  }
+
   // A truncated dynamic table can omit DT_NULL. Lookups must stop at its
   // declared PT_DYNAMIC size, rather than accessing memory past its end.
   std::fprintf(stderr, "Loader fixture: dynamic table without DT_NULL\n");
