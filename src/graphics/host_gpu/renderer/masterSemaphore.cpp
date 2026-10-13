@@ -96,6 +96,7 @@ void MasterSemaphore::Refresh() {
 	const auto result  = m_graphics.device.getSemaphoreCounterValue(m_semaphore, &counter);
     if (result != vk::Result::eSuccess) {
         ReportSemaphoreError("getCounter", result, 0, CurrentTick(), KnownGpuTick());
+        DumpRecentSubmissions();
     }
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 

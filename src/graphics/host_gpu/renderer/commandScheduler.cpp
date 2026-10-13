@@ -5,7 +5,9 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 namespace Libs::Graphics {
@@ -13,6 +15,28 @@ namespace Libs::Graphics {
 static thread_local CommandScheduler* g_deferred_callback_scheduler = nullptr;
 
 namespace {
+
+// This tool is deliberately opt-in and only active in a compatibility probe.
+// Serializing a narrow timeline region can determine whether an earlier
+// submission contains an invalid GPU command or an inter-submission hazard.
+// It must not become a production synchronization workaround.
+uint64_t ProbeSerializeAfterTick() {
+    static const uint64_t configured = [] {
+        if (std::getenv("XXII_COMPAT_PROBE") == nullptr) return uint64_t {0};
+        const char* value = std::getenv("XXII_GPU_SYNC_PROBE_START");
+        if (!value || !*value) return uint64_t {0};
+        errno = 0;
+        char* end = nullptr;
+        const auto start = std::strtoull(value, &end, 10);
+        if (errno != 0 || end == value || *end != '\0' ||
+            start < 1000 || start > 10000000) return uint64_t {0};
+        std::fprintf(stderr, "XXII_GPU_SYNC_PROBE_CONFIG start_tick=%" PRIu64 "\n",
+                     static_cast<uint64_t>(start));
+        std::fflush(stderr);
+        return static_cast<uint64_t>(start);
+    }();
+    return configured;
+}
 
 void ReportVulkanFatal(const char* what, vk::Result result, uint64_t tick, uint32_t debug_op,
                        uint64_t debug_submit, uint32_t arg0, uint32_t arg1, uint32_t arg2,
@@ -380,12 +404,21 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		                  m_command.m_debug_arg1, m_command.m_debug_arg2, m_command.m_debug_arg3,
 		                  m_command.m_debug_arg4);
 	}
+    if (result != vk::Result::eSuccess) m_master.DumpRecentSubmissions();
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
     m_master.RecordSubmission(tick, m_command.m_debug_op, m_command.m_debug_submit_id,
                               m_command.m_debug_arg0, m_command.m_debug_arg1,
                               m_command.m_debug_arg2, m_command.m_debug_arg3,
                               m_command.m_debug_arg4);
+    const auto syncStart = ProbeSerializeAfterTick();
+    if (syncStart != 0 && tick >= syncStart) {
+        // The current submit was successful. A failing wait now reports the
+        // *first* unfinished submission before later draws obscure the cause.
+        // No behavior changes without both explicit diagnostics environment
+        // flags; all normal workloads remain asynchronous.
+        m_master.Wait(tick);
+    }
 	m_command.m_buffer = nullptr;
 	return tick;
 }
