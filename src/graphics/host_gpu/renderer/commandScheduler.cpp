@@ -382,6 +382,10 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
+    m_master.RecordSubmission(tick, m_command.m_debug_op, m_command.m_debug_submit_id,
+                              m_command.m_debug_arg0, m_command.m_debug_arg1,
+                              m_command.m_debug_arg2, m_command.m_debug_arg3,
+                              m_command.m_debug_arg4);
 	m_command.m_buffer = nullptr;
 	return tick;
 }

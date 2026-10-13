@@ -5,6 +5,9 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <atomic>
+#include <array>
+#include <cstddef>
+#include <mutex>
 
 namespace Libs::Graphics {
 
@@ -30,12 +33,30 @@ public:
 
 	void Refresh();
 	void Wait(uint64_t tick);
+    // Runtime-disabled except during explicit compatibility probes. Retain
+    // only numeric GPU operation metadata, never guest instructions/shaders.
+    void RecordSubmission(uint64_t tick, uint32_t operation, uint64_t submitId,
+                          uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint64_t e);
+    void DumpRecentSubmissions() const;
 
 private:
 	GraphicContext&       m_graphics;
 	vk::Semaphore         m_semaphore = nullptr;
 	std::atomic<uint64_t> m_gpu_tick {0};
 	std::atomic<uint64_t> m_current_tick {1};
+    struct SubmittedOperation {
+        uint64_t tick = 0;
+        uint32_t operation = 0;
+        uint64_t submitId = 0;
+        uint32_t arg0 = 0, arg1 = 0, arg2 = 0, arg3 = 0;
+        uint64_t arg4 = 0;
+    };
+    static constexpr size_t TraceCapacity = 32;
+    mutable std::mutex m_traceMutex;
+    std::array<SubmittedOperation, TraceCapacity> m_trace {};
+    size_t m_traceHead = 0;
+    size_t m_traceCount = 0;
+    bool m_traceEnabled = false;
 };
 
 } // namespace Libs::Graphics
