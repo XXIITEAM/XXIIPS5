@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <type_traits>
+#include "common/diagnostics/runtimeTelemetry.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -103,6 +104,9 @@ inline Table* OpenNamed(const wchar_t* name) noexcept {
     return table; // valid until guest exit; the OS unmaps the view
 }
 inline Table* RuntimeTable() noexcept {
+#if !KYTY_DIAGNOSTIC_RUNTIME
+    return nullptr;
+#else
     static Table* table = []() -> Table* {
         char* name = nullptr;
         size_t length = 0;
@@ -132,6 +136,7 @@ inline Table* RuntimeTable() noexcept {
         return result;
     }();
     return table;
+#endif
 }
 inline Ticket Enter(Table* table, uint64_t call, Operation op, Mode mode,
                     uint64_t tickMs, uint32_t tid) noexcept {

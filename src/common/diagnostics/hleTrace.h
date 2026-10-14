@@ -15,6 +15,7 @@
 #include <string_view>
 #include <thread>
 #include "common/diagnostics/hleWaitSnapshot.h"
+#include "common/diagnostics/runtimeTelemetry.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -26,6 +27,9 @@
 namespace Common::HleTrace {
 
 inline bool Enabled() noexcept {
+#if !KYTY_DIAGNOSTIC_RUNTIME
+    return false;
+#else
     static const bool enabled = [] {
 #if defined(_MSC_VER)
         char* value = nullptr;
@@ -41,6 +45,7 @@ inline bool Enabled() noexcept {
 #endif
     }();
     return enabled;
+#endif
 }
 
 inline uint32_t ThreadToken() noexcept {
@@ -146,6 +151,7 @@ inline bool SampleOutlier() noexcept {
     return count <= 64 || count % 128 == 0;
 }
 
+#if KYTY_DIAGNOSTIC_RUNTIME
 class Span {
 public:
     Span(const char* operation, const char* mode) noexcept: m_operation(operation), m_mode(mode) {
@@ -217,6 +223,15 @@ private:
     bool m_finished = false;
     bool m_active = false;
 };
+#else
+class Span {
+public:
+    Span(const char*, const char*) noexcept {}
+    Span(const Span&) = delete;
+    Span& operator=(const Span&) = delete;
+    void Finish(int64_t) noexcept {}
+};
+#endif
 
 inline const char* SourceBase(const char* file, char (&output)[49]) noexcept {
     if (!file) return "unknown";

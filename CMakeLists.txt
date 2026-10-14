@@ -201,6 +201,23 @@ config_compiler_and_linker()
 add_subdirectory("${KYTY_THIRD_PARTY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/3rdparty")
 add_subdirectory("${KYTY_SOURCE_DIR}/common" "${CMAKE_CURRENT_BINARY_DIR}/common")
 
+# Product edition isolation must reach the guest runtime, not just Qt.
+# Non-PSVXXII builds retain the upstream diagnostic behavior.
+if(KYTY_BUILD_LAUNCHER AND WIN32)
+	option(XXII_BUILD_PSVXXII "Build new Qt Quick controller-first frontend" ON)
+endif()
+if(KYTY_BUILD_LAUNCHER AND XXII_BUILD_PSVXXII)
+	set(PSVXXII_EDITION "RELEASE" CACHE STRING "PSVXXII product edition: RELEASE or DEVELOPER")
+	if(NOT PSVXXII_EDITION STREQUAL "RELEASE" AND NOT PSVXXII_EDITION STREQUAL "DEVELOPER")
+		message(FATAL_ERROR "Unknown PSVXXII_EDITION='${PSVXXII_EDITION}'")
+	endif()
+	if(PSVXXII_EDITION STREQUAL "RELEASE")
+		target_compile_definitions(common PUBLIC KYTY_DIAGNOSTIC_RUNTIME=0)
+	else()
+		target_compile_definitions(common PUBLIC KYTY_DIAGNOSTIC_RUNTIME=1)
+	endif()
+endif()
+
 file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
 	"${KYTY_SOURCE_DIR}/libs/*.cpp"
 	"${KYTY_SOURCE_DIR}/libs/*.h"
@@ -614,6 +631,16 @@ add_executable(hle_trace_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(hle_trace_tests PRIVATE ${inc_headers})
 
+add_executable(frame_timing_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/FrameTimingTests.cpp")
+target_include_directories(frame_timing_tests PRIVATE ${inc_headers})
+if(LINUX)
+	target_link_libraries(frame_timing_tests Threads::Threads)
+endif()
+add_executable(runtime_telemetry_release_tests EXCLUDE_FROM_ALL
+    "${KYTY_TESTS_DIR}/RuntimeTelemetryReleaseTests.cpp")
+target_include_directories(runtime_telemetry_release_tests PRIVATE ${inc_headers})
+target_compile_definitions(runtime_telemetry_release_tests PRIVATE KYTY_DIAGNOSTIC_RUNTIME=0)
+
 add_kyty_full_emulator_test(shader_recompiler_compute_tests "${KYTY_TESTS_DIR}/ShaderRecompilerComputeTests.cpp")
 
 set(gpu_test_generated_dir "${PROJECT_BINARY_DIR}/gpu_test_shaders")
@@ -685,6 +712,9 @@ if(BUILD_TESTING)
 	add_test(NAME compatibility_patch_policy COMMAND $<TARGET_FILE:compatibility_patch_policy_tests>)
 	add_test(NAME gpu_index_bounds COMMAND $<TARGET_FILE:gpu_index_bounds_tests>)
 	add_test(NAME hle_trace COMMAND $<TARGET_FILE:hle_trace_tests>)
+	add_test(NAME frame_timing COMMAND $<TARGET_FILE:frame_timing_tests>)
+	add_test(NAME runtime_telemetry_release COMMAND $<TARGET_FILE:runtime_telemetry_release_tests>)
+	set_tests_properties(runtime_telemetry_release PROPERTIES FAIL_REGULAR_EXPRESSION "XXII_HLE_")
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
@@ -794,6 +824,8 @@ if(BUILD_TESTING)
 		compatibility_patch_policy_tests
 		gpu_index_bounds_tests
 		hle_trace_tests
+		frame_timing_tests
+		runtime_telemetry_release_tests
 		memory_tracker_tests
 		page_manager_tests
 		archive_file_tests

@@ -848,6 +848,18 @@ void WindowContext::Run() {
 		const auto now     = SDL_GetTicks();
 		const auto elapsed = now - title_time;
 		if (elapsed >= title_interval_ms) {
+#if KYTY_DIAGNOSTIC_RUNTIME
+			if (loop.frame_timing) {
+				const auto summary = loop.frame_timing->Drain();
+				std::fprintf(stderr,
+				             "XXII_FRAMETIME_V1 samples=%zu dropped=%" PRIu64
+				             " invalid=%" PRIu64 " p95_ns=%" PRIu64
+				             " p99_ns=%" PRIu64 " max_ns=%" PRIu64 "\n",
+				             summary.count, summary.dropped, summary.invalid,
+				             summary.p95Ns, summary.p99Ns, summary.maxNs);
+				std::fflush(stderr);
+			}
+#endif
 			const auto frames = loop.presented_frames.load(std::memory_order_relaxed);
 			if (frames != 0) {
 				UpdateTitle(frames, static_cast<double>(frames - title_frames) * 1000.0 /

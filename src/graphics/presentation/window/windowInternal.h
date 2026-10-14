@@ -6,6 +6,10 @@
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "common/diagnostics/runtimeTelemetry.h"
+#if KYTY_DIAGNOSTIC_RUNTIME
+#include "common/diagnostics/frameTiming.h"
+#endif
 
 #include <atomic>
 #include <cstdint>
@@ -28,6 +32,9 @@ struct WindowLoopState {
 	bool             need_exit = false;
 	std::atomic_bool paused    = false;
 	std::atomic<uint64_t> presented_frames {0};
+#if KYTY_DIAGNOSTIC_RUNTIME
+	std::unique_ptr<Common::Diagnostics::FrameTiming> frame_timing;
+#endif
 };
 
 struct WindowContext {

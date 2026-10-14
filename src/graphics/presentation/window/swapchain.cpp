@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -1058,6 +1060,13 @@ void Presenter::Impl::Present() {
 
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
 		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
+#if KYTY_DIAGNOSTIC_RUNTIME
+		if (window.loop.frame_timing) {
+			const auto now = std::chrono::steady_clock::now().time_since_epoch();
+			window.loop.frame_timing->Present(static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()));
+		}
+#endif
 		return;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");
@@ -1067,6 +1076,13 @@ void Presenter::Discard(Frame& frame) {
 	m_impl->frames.Release(&frame);
 }
 
-WindowContext::WindowContext() = default;
+WindowContext::WindowContext() {
+#if KYTY_DIAGNOSTIC_RUNTIME
+	const char* enabled = std::getenv("XXII_FRAMETIME_TRACE");
+	if (enabled && enabled[0] == '1' && enabled[1] == '\0') {
+		loop.frame_timing = std::make_unique<Common::Diagnostics::FrameTiming>();
+	}
+#endif
+}
 
 } // namespace Libs::Graphics
