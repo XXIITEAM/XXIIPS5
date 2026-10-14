@@ -593,9 +593,9 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 
 	if (m_ehdr != nullptr /*&& m_self == nullptr*/) {
 		const auto file_size = m_f->Size();
-		// Any declared program headers are mandatory and always range-checked.
-		// A section-only/header-only ELF with no PT_DYNAMIC can be valid.
-		// Section headers are not needed by the ELF dynamic
+		// Any declared program-header table is mandatory and range-checked.
+		// Header-only and section-only ELF files can be valid; optional
+		// section headers are not required by the ELF dynamic
 		// loader. Some lawful PS5 decrypted/repacked ELF64 images retain stale
 		// shoff/shnum values from their original container. Rejecting the whole
 		// file here prevents loading even when all PT_LOAD/PT_DYNAMIC entries

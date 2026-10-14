@@ -230,11 +230,8 @@ void TestTruncatedElfTables(const std::filesystem::path& root) {
           "ELF without PT_DYNAMIC safely reports no dynamic imports");
   }
 
-  // Some decrypted PS5 ELF images contain a stale out-of-bounds
-  // SECTION table despite having valid program headers. The loader may
-  // ignore that optional table only for PS5 dynamic executables with a
-  // real, validated program-header table. Do not weaken the general ELF
-  // rejection policy (including the zero-phdr test above).
+  // Recover stale sections only for PS5 dynamic executables with a
+  // valid program-header table; reject non-PS5/other ELF types.
   {
     auto patched = header;
     patched.e_phoff = sizeof(patched);
@@ -256,10 +253,24 @@ void TestTruncatedElfTables(const std::filesystem::path& root) {
     Loader::Elf64 recovered;
     recovered.Open(path);
     Check(recovered.IsValid() && recovered.GetEhdr() != nullptr &&
-          recovered.GetEhdr()->e_shnum == 0 && recovered.GetShdr() == nullptr,
-          "PS5 ELF with valid program headers tolerates stale optional sections");
+          recovered.GetEhdr()->e_shnum == 0 && recovered.GetShdr() == nullptr &&
+          recovered.GetPhdr() != nullptr,
+          "PS5 ELF with valid program headers ignores stale sections");
 
-    // A non-PS5 ELF with the same corrupt section table must still fail.
+    // ET_DYNAMIC is not PS5 ET_DYNEXEC and must not use this recovery.
+    patched.e_type = Loader::ET_DYNAMIC;
+    {
+      std::ofstream file(path, std::ios::binary | std::ios::trunc);
+      file.write(reinterpret_cast<const char*>(&patched), sizeof(patched));
+      file.write(reinterpret_cast<const char*>(&load), sizeof(load));
+      Check(static_cast<bool>(file), "write ET_DYNAMIC with stale sections");
+    }
+    Loader::Elf64 otherType;
+    otherType.Open(path);
+    Check(!otherType.IsValid(), "stale section recovery is limited to PS5 ET_DYNEXEC");
+
+    // Non-PS5 OSABI is also excluded from the PS5-specific workaround.
+    patched.e_type = Loader::ET_DYNEXEC;
     patched.e_ident[Loader::EI_OSABI] = 0;
     {
       std::ofstream file(path, std::ios::binary | std::ios::trunc);
