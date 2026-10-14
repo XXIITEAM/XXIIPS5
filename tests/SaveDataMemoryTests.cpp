@@ -241,7 +241,7 @@ void TestFailedWritePreservesSave() {
 	CHECK(Set(&byte, 1) < 0);
 	CHECK(Get()[0] == 42);
 	CHECK(fs::remove("_SaveData"));
-	fs::rename("save-backup", "_SaveData");
+	fs::copy("save-backup", "_SaveData", fs::copy_options::recursive);
 	CHECK(SaveDataTerminate() == OK);
 	CHECK(Setup() == 16);
 	CHECK(Get()[0] == 42);
@@ -613,11 +613,22 @@ int main(int argc, char** argv) {
 	fs::current_path(temp);
 	RunChild(executable, "write");
 	RunChild(executable, "read");
+	std::fprintf(stderr, "SaveDataMemoryTests: validation and scatter\n");
 	TestValidationAndScatter();
+	std::fprintf(stderr, "SaveDataMemoryTests: isolation and sync\n");
 	TestIsolationAndSync();
-	TestFailedWritePreservesSave();
+	std::fprintf(stderr, "SaveDataMemoryTests: failed write preserves save\n");
+	try {
+		TestFailedWritePreservesSave();
+	} catch (const fs::filesystem_error& error) {
+		std::fprintf(stderr, "SaveDataMemoryTests: filesystem error: %s\n", error.what());
+		return 1;
+	}
+	std::fprintf(stderr, "SaveDataMemoryTests: classic save paths\n");
 	TestClassicSavePaths();
+	std::fprintf(stderr, "SaveDataMemoryTests: allocations\n");
 	TestSaveAllocations();
+	std::fprintf(stderr, "SaveDataMemoryTests: classic save params\n");
 	TestClassicSaveParams();
 	CHECK(SaveDataTerminate() == OK);
 	fs::current_path(previous);
