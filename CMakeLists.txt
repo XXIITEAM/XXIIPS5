@@ -594,6 +594,11 @@ add_executable(gpu_descriptor_bounds_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(gpu_descriptor_bounds_tests PRIVATE ${inc_headers})
 
+add_executable(compatibility_patch_policy_tests EXCLUDE_FROM_ALL
+    "${KYTY_TESTS_DIR}/CompatibilityPatchPolicyTests.cpp"
+)
+target_include_directories(compatibility_patch_policy_tests PRIVATE ${inc_headers})
+
 add_executable(gpu_resource_lifetime_tests EXCLUDE_FROM_ALL
     "${KYTY_TESTS_DIR}/GpuResourceLifetimeTests.cpp"
 )
@@ -677,6 +682,7 @@ if(BUILD_TESTING)
 	add_test(NAME gpu_flight_recorder COMMAND $<TARGET_FILE:gpu_flight_recorder_tests>)
 	add_test(NAME gpu_descriptor_bounds COMMAND $<TARGET_FILE:gpu_descriptor_bounds_tests>)
 	add_test(NAME gpu_resource_lifetime COMMAND $<TARGET_FILE:gpu_resource_lifetime_tests>)
+	add_test(NAME compatibility_patch_policy COMMAND $<TARGET_FILE:compatibility_patch_policy_tests>)
 	add_test(NAME gpu_index_bounds COMMAND $<TARGET_FILE:gpu_index_bounds_tests>)
 	add_test(NAME hle_trace COMMAND $<TARGET_FILE:hle_trace_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
@@ -785,6 +791,7 @@ if(BUILD_TESTING)
 		gpu_flight_recorder_tests
 		gpu_descriptor_bounds_tests
 		gpu_resource_lifetime_tests
+		compatibility_patch_policy_tests
 		gpu_index_bounds_tests
 		hle_trace_tests
 		memory_tracker_tests
