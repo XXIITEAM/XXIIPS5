@@ -1,10 +1,15 @@
 #include "graphics/host_gpu/renderer/gpuResourceLifetime.h"
+#include "graphics/host_gpu/renderer/masterSemaphore.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 using namespace Libs::Graphics::GpuTrace;
+
+template <typename T>
+concept HasResourceCapture = requires { &T::RecordResourceEvent; };
+static_assert(HasResourceCapture<Libs::Graphics::MasterSemaphore>);
 
 void Require(bool condition, const char* message) {
     if (!condition) {
@@ -25,23 +30,26 @@ int main() {
     Require(PrematureResourceRetire(too_early), "early destruction detected");
     trace.Push(created); trace.Push(queued); trace.Push(executed);
     Require(trace.Count() == 3 && trace.At(0).slot_generation == 1, "normal sequence");
-    FILE* report = std::tmpfile();
-    Require(report != nullptr, "temp report");
+    constexpr const char* report_name = "gpu-resource-lifetime-test-report.txt";
+    FILE* report = std::fopen(report_name, "w+bx");
+    Require(report != nullptr, "exclusive project-local report");
     trace.Dump(report, true);
     std::rewind(report);
     char data[5000] {};
     auto read = std::fread(data, 1, sizeof(data) - 1, report);
     std::fclose(report);
+    Require(std::remove(report_name) == 0, "remove project-local report");
     Require(read > 0 && std::strstr(data, "premature_retire=0"), "valid report");
     Require(std::strstr(data, "slot=5 generation=1"), "stable slot and generation");
     trace.Push(too_early);
-    report = std::tmpfile();
-    Require(report != nullptr, "temp violation report");
+    report = std::fopen(report_name, "w+bx");
+    Require(report != nullptr, "exclusive project-local violation report");
     trace.Dump(report, true);
     std::rewind(report);
     std::memset(data, 0, sizeof(data));
     read = std::fread(data, 1, sizeof(data) - 1, report);
     std::fclose(report);
+    Require(std::remove(report_name) == 0, "remove project-local violation report");
     Require(read > 0 && std::strstr(data, "premature_retire=1"), "violation in report");
     for (uint64_t i = 0; i < ResourceLifetimeHistory::Capacity + 6; ++i)
         trace.Push({ResourceAction::Created, i, i, 0, 4, uint32_t(i), 2, 5, 0});
@@ -51,5 +59,6 @@ int main() {
             "last event retained");
     Require(std::strcmp(ResourceActionName(ResourceAction::RetireQueued), "retire_queued") == 0,
             "event name");
-    std::puts("GPU resource lifetime tests passed");
+    std::printf("GPU resource lifetime tests passed master_bytes=%zu history_bytes=%zu\n",
+                sizeof(Libs::Graphics::MasterSemaphore), sizeof(ResourceLifetimeHistory));
 }

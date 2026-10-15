@@ -196,6 +196,7 @@ TextureCache::BindingType TextureCache::UploadBinding(const Image& image) {
 	return image.usage.storage ? BindingType::Storage : BindingType::Texture;
 }
 
+#if KYTY_DIAGNOSTIC_RUNTIME
 void TextureCache::LogImageLifetime(GpuTrace::ResourceAction action, ImageId id,
                                     const Image& image, uint64_t retire_tick) {
     const uint32_t flags = (image.info.IsDepth() ? 1u : 0u) |
@@ -207,6 +208,7 @@ void TextureCache::LogImageLifetime(GpuTrace::ResourceAction action, ImageId id,
         action, m_scheduler.CurrentTick(), retire_tick, id.index, id.generation,
         static_cast<uint32_t>(image.info.pixel_format), flags, image.info.data.size);
 }
+#endif
 
 ImageId TextureCache::InsertImage(const ImageInfo& info) {
 	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
@@ -214,7 +216,9 @@ ImageId TextureCache::InsertImage(const ImageInfo& info) {
 	if (!info.data.Empty()) {
 		RegisterImage(id);
 	}
+#if KYTY_DIAGNOSTIC_RUNTIME
 	LogImageLifetime(GpuTrace::ResourceAction::Created, id, m_slot_images[id]);
+#endif
 	return id;
 }
 
@@ -291,16 +295,22 @@ void TextureCache::DeleteImage(ImageId id) {
 	}
 	UnregisterImage(id);
 	if (m_scheduler.Active()) {
+#if KYTY_DIAGNOSTIC_RUNTIME
 		const uint64_t retire_tick = m_scheduler.CurrentTick();
 		LogImageLifetime(GpuTrace::ResourceAction::RetireQueued, id, *image, retire_tick);
 		m_scheduler.DeferOperation([this, id, retire_tick] {
 			if (const auto* retired = m_slot_images.try_get(id))
 				LogImageLifetime(GpuTrace::ResourceAction::RetireExecuted,
 				                 id, *retired, retire_tick);
+#else
+		m_scheduler.DeferOperation([this, id] {
+#endif
 			m_slot_images.erase(id);
 		});
 	} else {
+#if KYTY_DIAGNOSTIC_RUNTIME
 		LogImageLifetime(GpuTrace::ResourceAction::RetireImmediate, id, *image);
+#endif
 		m_slot_images.erase(id);
 	}
 }

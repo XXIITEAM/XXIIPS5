@@ -3,13 +3,16 @@
 
 #include "common/abi.h"
 #include "common/common.h"
+#include "common/diagnostics/runtimeTelemetry.h"
 #include "common/lruCache.h"
 #include "common/slotVector.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
+#if KYTY_DIAGNOSTIC_RUNTIME
 #include "graphics/host_gpu/renderer/gpuResourceLifetime.h"
+#endif
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
@@ -120,8 +123,10 @@ private:
 	void                      UnregisterImage(ImageId id);
 	void                      DeleteImage(ImageId id);
 	void                      FreeImage(ImageId id);
+#if KYTY_DIAGNOSTIC_RUNTIME
     void                      LogImageLifetime(GpuTrace::ResourceAction action, ImageId id,
                                                const Image& image, uint64_t retire_tick = 0);
+#endif
 	void                      TouchImage(Image& image);
 	void                      TrackImage(ImageId id);
 	void                      TrackImageHead(ImageId id);

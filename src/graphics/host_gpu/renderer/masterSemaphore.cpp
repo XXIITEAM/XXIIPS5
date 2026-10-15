@@ -71,9 +71,11 @@ MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics)
     const char* flight = std::getenv("XXII_COMPAT_GPU_FLIGHT_RECORDER");
     if (m_traceEnabled && flight && flight[0] == '1' && flight[1] == '\0')
         m_flight_recorder = std::make_unique<GpuTrace::FlightRecorder>();
+#if KYTY_DIAGNOSTIC_RUNTIME
     const char* resource_trace = std::getenv("XXII_COMPAT_GPU_RESOURCE_LIFETIME");
     m_resource_trace_enabled = m_traceEnabled && resource_trace &&
         resource_trace[0] == '1' && resource_trace[1] == '\0';
+#endif
     if (m_traceEnabled) {
         std::fprintf(stderr, "XXII_GPU_BREADCRUMB_INIT capacity=%zu\n", TraceCapacity);
         std::fflush(stderr);
@@ -114,6 +116,7 @@ void MasterSemaphore::RecordSubmission(uint64_t tick, uint32_t operation,
         m_flight_recorder->Add(tick, commands);
 }
 
+#if KYTY_DIAGNOSTIC_RUNTIME
 void MasterSemaphore::RecordResourceEvent(GpuTrace::ResourceAction action, uint64_t tick,
                                          uint64_t retire_tick, uint32_t slot,
                                          uint32_t generation, uint32_t format,
@@ -125,6 +128,7 @@ void MasterSemaphore::RecordResourceEvent(GpuTrace::ResourceAction action, uint6
     std::lock_guard guard(m_traceMutex);
     m_resource_history.Push(event);
 }
+#endif
 
 void MasterSemaphore::DumpDeviceFault() const {
     if (!m_graphics.device_fault_ext_enabled || m_graphics.device == nullptr) return;
@@ -268,11 +272,15 @@ void MasterSemaphore::SampleFlightRecorder(uint64_t submitted_tick) const {
     const char* report_path = std::getenv("XXII_COMPAT_GPU_FLIGHT_LOG");
     if (!report_path || !*report_path) return;
     auto snapshot = std::make_unique<GpuTrace::FlightRecorder>();
+#if KYTY_DIAGNOSTIC_RUNTIME
     GpuTrace::ResourceLifetimeHistory resource_snapshot;
+#endif
     {
         std::lock_guard guard(m_traceMutex);
         *snapshot = *m_flight_recorder;
+#if KYTY_DIAGNOSTIC_RUNTIME
         if (m_resource_trace_enabled) resource_snapshot = m_resource_history;
+#endif
     }
     if (FILE* report = std::fopen(report_path, "ab")) {
         std::fprintf(report,
@@ -280,7 +288,9 @@ void MasterSemaphore::SampleFlightRecorder(uint64_t submitted_tick) const {
                      " known_completed=%" PRIu64 "\n",
                      submitted_tick, KnownGpuTick());
         snapshot->Dump(report, KnownGpuTick(), false);
+#if KYTY_DIAGNOSTIC_RUNTIME
         if (m_resource_trace_enabled) resource_snapshot.Dump(report, false);
+#endif
         std::fclose(report);
     }
 }
@@ -291,13 +301,17 @@ void MasterSemaphore::DumpRecentSubmissions() const {
     auto flight_snapshot = m_flight_recorder
                                ? std::make_unique<GpuTrace::FlightRecorder>()
                                : nullptr;
+#if KYTY_DIAGNOSTIC_RUNTIME
     GpuTrace::ResourceLifetimeHistory resource_snapshot;
+#endif
     size_t count = 0;
     {
         std::lock_guard guard(m_traceMutex);
         count = m_traceCount;
         if (flight_snapshot) *flight_snapshot = *m_flight_recorder;
+#if KYTY_DIAGNOSTIC_RUNTIME
         resource_snapshot = m_resource_history;
+#endif
         const size_t oldest = (m_traceHead + TraceCapacity - count) % TraceCapacity;
         for (size_t i = 0; i < count; ++i)
             snapshot[i] = m_trace[(oldest + i) % TraceCapacity];
@@ -315,13 +329,17 @@ void MasterSemaphore::DumpRecentSubmissions() const {
     }
     if (flight_snapshot && flight_snapshot->Count() != 0) {
         flight_snapshot->Dump(stderr, KnownGpuTick());
+#if KYTY_DIAGNOSTIC_RUNTIME
         if (m_resource_trace_enabled) resource_snapshot.Dump(stderr, false);
+#endif
         // Project-local opt-in postmortem log, immune to UI marker truncation.
         const char* report_path = std::getenv("XXII_COMPAT_GPU_FLIGHT_LOG");
         if (report_path != nullptr && report_path[0] != '\0') {
             if (FILE* report = std::fopen(report_path, "ab")) {
                 flight_snapshot->Dump(report, KnownGpuTick(), true, true);
+#if KYTY_DIAGNOSTIC_RUNTIME
                 if (m_resource_trace_enabled) resource_snapshot.Dump(report, true);
+#endif
                 std::fclose(report);
             }
         }

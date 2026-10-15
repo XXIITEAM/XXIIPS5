@@ -2,8 +2,11 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_MASTERSEMAPHORE_H_
 
 #include "common/common.h"
+#include "common/diagnostics/runtimeTelemetry.h"
 #include "graphics/host_gpu/renderer/gpuFlightRecorder.h"
+#if KYTY_DIAGNOSTIC_RUNTIME
 #include "graphics/host_gpu/renderer/gpuResourceLifetime.h"
+#endif
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <atomic>
@@ -44,9 +47,11 @@ public:
                           const GpuTrace::CommandTrace& commands);
     void DumpRecentSubmissions() const;
     void SampleFlightRecorder(uint64_t submitted_tick) const;
+#if KYTY_DIAGNOSTIC_RUNTIME
     void RecordResourceEvent(GpuTrace::ResourceAction action, uint64_t tick,
                              uint64_t retire_tick, uint32_t slot, uint32_t generation,
                              uint32_t format, uint32_t flags, uint64_t bytes);
+#endif
     void DumpDeviceFault() const;
     void DumpCheckpoints() const;
 
@@ -72,8 +77,10 @@ private:
     // A full recorder is about a megabyte. Allocate only in opt-in probes:
     // CommandScheduler can otherwise live on the Windows test thread stack.
     std::unique_ptr<GpuTrace::FlightRecorder> m_flight_recorder;
+#if KYTY_DIAGNOSTIC_RUNTIME
     bool m_resource_trace_enabled = false;
     GpuTrace::ResourceLifetimeHistory m_resource_history;
+#endif
 };
 
 } // namespace Libs::Graphics

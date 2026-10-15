@@ -2,6 +2,7 @@
 #include "common/common.h"
 #include "common/dateTime.h"
 #include "common/debug.h"
+#include "common/diagnostics/runtimeTelemetry.h"
 #include "common/file.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -11,6 +12,7 @@
 
 #include <charconv>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <string_view>
 #include <vector>
@@ -486,6 +488,14 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 }
 
 static int Main(int argc, char* argv[]) {
+#if !KYTY_DIAGNOSTIC_RUNTIME
+	const char* resource_trace = std::getenv("XXII_COMPAT_GPU_RESOURCE_LIFETIME");
+	if (resource_trace && resource_trace[0] == '1' && resource_trace[1] == '\0') {
+		std::fprintf(stderr, "XXII_RUNTIME_OPTION_UNAVAILABLE edition=RELEASE"
+		                     " feature=gpu_resource_lifetime required=DEVELOPER\n");
+		return 2;
+	}
+#endif
 	VirtualMemory::Init();
 	InitializeThreads();
 

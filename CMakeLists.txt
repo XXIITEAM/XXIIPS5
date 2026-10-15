@@ -620,6 +620,7 @@ add_executable(gpu_resource_lifetime_tests EXCLUDE_FROM_ALL
     "${KYTY_TESTS_DIR}/GpuResourceLifetimeTests.cpp"
 )
 target_include_directories(gpu_resource_lifetime_tests PRIVATE ${inc_headers})
+target_link_libraries(gpu_resource_lifetime_tests PRIVATE Vulkan::Headers)
 
 add_executable(gpu_index_bounds_tests EXCLUDE_FROM_ALL
     "${KYTY_TESTS_DIR}/GpuIndexBoundsTests.cpp"
@@ -640,6 +641,7 @@ add_executable(runtime_telemetry_release_tests EXCLUDE_FROM_ALL
     "${KYTY_TESTS_DIR}/RuntimeTelemetryReleaseTests.cpp")
 target_include_directories(runtime_telemetry_release_tests PRIVATE ${inc_headers})
 target_compile_definitions(runtime_telemetry_release_tests PRIVATE KYTY_DIAGNOSTIC_RUNTIME=0)
+target_link_libraries(runtime_telemetry_release_tests PRIVATE Vulkan::Headers)
 
 add_kyty_full_emulator_test(shader_recompiler_compute_tests "${KYTY_TESTS_DIR}/ShaderRecompilerComputeTests.cpp")
 
@@ -709,6 +711,21 @@ if(BUILD_TESTING)
 	add_test(NAME gpu_flight_recorder COMMAND $<TARGET_FILE:gpu_flight_recorder_tests>)
 	add_test(NAME gpu_descriptor_bounds COMMAND $<TARGET_FILE:gpu_descriptor_bounds_tests>)
 	add_test(NAME gpu_resource_lifetime COMMAND $<TARGET_FILE:gpu_resource_lifetime_tests>)
+	set(kyty_resource_diagnostic ON)
+	if(KYTY_BUILD_LAUNCHER AND XXII_BUILD_PSVXXII AND PSVXXII_EDITION STREQUAL "RELEASE")
+		set(kyty_resource_diagnostic OFF)
+	endif()
+	add_test(NAME gpu_resource_lifetime_edition COMMAND ${CMAKE_COMMAND}
+		"-DRUNTIME=$<TARGET_FILE:kyty_emulator>"
+		"-DDIAGNOSTIC_RUNTIME=${kyty_resource_diagnostic}"
+		-P "${KYTY_TESTS_DIR}/GpuResourceLifetimeEdition.cmake")
+	if(kyty_resource_diagnostic)
+		add_test(NAME gpu_resource_lifetime_capture COMMAND ${CMAKE_COMMAND}
+			"-DFIXTURE=$<TARGET_FILE:shader_recompiler_compute_tests>"
+			-P "${KYTY_TESTS_DIR}/GpuResourceLifetimeCapture.cmake")
+		set_tests_properties(gpu_resource_lifetime_capture PROPERTIES
+			RESOURCE_LOCK xxii_vulkan_gpu RUN_SERIAL TRUE)
+	endif()
 	add_test(NAME compatibility_patch_policy COMMAND $<TARGET_FILE:compatibility_patch_policy_tests>)
 	add_test(NAME gpu_index_bounds COMMAND $<TARGET_FILE:gpu_index_bounds_tests>)
 	add_test(NAME hle_trace COMMAND $<TARGET_FILE:hle_trace_tests>)
