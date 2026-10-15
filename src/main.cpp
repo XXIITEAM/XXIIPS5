@@ -495,6 +495,22 @@ static int Main(int argc, char* argv[]) {
 		                     " feature=gpu_resource_lifetime required=DEVELOPER\n");
 		return 2;
 	}
+	const char* flight = std::getenv("XXII_COMPAT_GPU_FLIGHT_RECORDER");
+	const char* flight_log = std::getenv("XXII_COMPAT_GPU_FLIGHT_LOG");
+	const char* checkpoint_start = std::getenv("XXII_GPU_OP_CHECKPOINT_START");
+	bool checkpoint_requested = false;
+	if (checkpoint_start && *checkpoint_start) {
+		char* end = nullptr;
+		const auto tick = std::strtoull(checkpoint_start, &end, 10);
+		checkpoint_requested = end != checkpoint_start && *end == '\0' &&
+		                       tick >= 1000 && tick <= 10000000;
+	}
+	if ((flight && flight[0] == '1' && flight[1] == '\0') ||
+	    (flight_log && *flight_log) || checkpoint_requested) {
+		std::fprintf(stderr, "XXII_RUNTIME_OPTION_UNAVAILABLE edition=RELEASE"
+		                     " feature=gpu_command_trace required=DEVELOPER\n");
+		return 2;
+	}
 #endif
 	VirtualMemory::Init();
 	InitializeThreads();

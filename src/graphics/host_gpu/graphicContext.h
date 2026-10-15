@@ -3,6 +3,7 @@
 
 #include "common/abi.h"
 #include "common/common.h"
+#include "common/diagnostics/runtimeTelemetry.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
 
@@ -31,7 +32,9 @@ struct GraphicContext {
     // Allows querying Vulkan's structured fault metadata after device loss.
     bool                               device_fault_ext_enabled            = false;
     // NV diagnostic checkpoints are optional and active only in CI probes.
+#if KYTY_DIAGNOSTIC_RUNTIME
     bool                               device_checkpoints_enabled          = false;
+#endif
 	bool                               compute_subgroup_size_control_enabled = false;
 	bool                               sample_rate_shading_enabled           = false;
 	bool                               shader_image_int64_atomics_enabled    = false;

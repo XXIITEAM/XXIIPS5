@@ -6,8 +6,11 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <array>
 #include <algorithm>
+#if KYTY_DIAGNOSTIC_RUNTIME
 #include <memory>
+#endif
 
 namespace Libs::Graphics {
 
@@ -47,6 +50,7 @@ void ReportSemaphoreError(const char* operation, vk::Result result, uint64_t wan
                  operation, name.c_str(), static_cast<int>(result),
                  wanted, submitted, completed);
     std::fflush(stderr);
+#if KYTY_DIAGNOSTIC_RUNTIME
     // Persist the real Vulkan error alongside the flight command trace.
     // Frontend queues are bounded and may omit the terminal error.
     const char* probe = std::getenv("XXII_COMPAT_PROBE");
@@ -62,24 +66,25 @@ void ReportSemaphoreError(const char* operation, vk::Result result, uint64_t wan
             std::fclose(report);
         }
     }
+#endif
 }
 } // namespace
 
 MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics) {
+#if KYTY_DIAGNOSTIC_RUNTIME
     const char* probe = std::getenv("XXII_COMPAT_PROBE");
     m_traceEnabled = probe && probe[0] == '1' && probe[1] == '\0';
     const char* flight = std::getenv("XXII_COMPAT_GPU_FLIGHT_RECORDER");
     if (m_traceEnabled && flight && flight[0] == '1' && flight[1] == '\0')
         m_flight_recorder = std::make_unique<GpuTrace::FlightRecorder>();
-#if KYTY_DIAGNOSTIC_RUNTIME
     const char* resource_trace = std::getenv("XXII_COMPAT_GPU_RESOURCE_LIFETIME");
     m_resource_trace_enabled = m_traceEnabled && resource_trace &&
         resource_trace[0] == '1' && resource_trace[1] == '\0';
-#endif
     if (m_traceEnabled) {
         std::fprintf(stderr, "XXII_GPU_BREADCRUMB_INIT capacity=%zu\n", TraceCapacity);
         std::fflush(stderr);
     }
+#endif
 	vk::SemaphoreTypeCreateInfo type_info {};
 	type_info.semaphoreType = vk::SemaphoreType::eTimeline;
 	type_info.initialValue  = 0;
@@ -94,6 +99,7 @@ MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics)
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess || m_semaphore == nullptr);
 }
 
+#if KYTY_DIAGNOSTIC_RUNTIME
 void MasterSemaphore::RecordSubmission(uint64_t tick, uint32_t operation,
                                        uint64_t submitId, uint32_t a, uint32_t b,
                                        uint32_t c, uint32_t d, uint64_t e,
@@ -116,7 +122,6 @@ void MasterSemaphore::RecordSubmission(uint64_t tick, uint32_t operation,
         m_flight_recorder->Add(tick, commands);
 }
 
-#if KYTY_DIAGNOSTIC_RUNTIME
 void MasterSemaphore::RecordResourceEvent(GpuTrace::ResourceAction action, uint64_t tick,
                                          uint64_t retire_tick, uint32_t slot,
                                          uint32_t generation, uint32_t format,
@@ -128,7 +133,7 @@ void MasterSemaphore::RecordResourceEvent(GpuTrace::ResourceAction action, uint6
     std::lock_guard guard(m_traceMutex);
     m_resource_history.Push(event);
 }
-#endif
+#endif // KYTY_DIAGNOSTIC_RUNTIME
 
 void MasterSemaphore::DumpDeviceFault() const {
     if (!m_graphics.device_fault_ext_enabled || m_graphics.device == nullptr) return;
@@ -190,6 +195,7 @@ void MasterSemaphore::DumpDeviceFault() const {
     std::fflush(stderr);
 }
 
+#if KYTY_DIAGNOSTIC_RUNTIME
 void MasterSemaphore::DumpCheckpoints() const {
     // vkGetQueueCheckpointDataNV is valid only after VK_ERROR_DEVICE_LOST.
     // Callers enforce that condition. Markers are opaque numeric IDs assigned
@@ -272,15 +278,11 @@ void MasterSemaphore::SampleFlightRecorder(uint64_t submitted_tick) const {
     const char* report_path = std::getenv("XXII_COMPAT_GPU_FLIGHT_LOG");
     if (!report_path || !*report_path) return;
     auto snapshot = std::make_unique<GpuTrace::FlightRecorder>();
-#if KYTY_DIAGNOSTIC_RUNTIME
     GpuTrace::ResourceLifetimeHistory resource_snapshot;
-#endif
     {
         std::lock_guard guard(m_traceMutex);
         *snapshot = *m_flight_recorder;
-#if KYTY_DIAGNOSTIC_RUNTIME
         if (m_resource_trace_enabled) resource_snapshot = m_resource_history;
-#endif
     }
     if (FILE* report = std::fopen(report_path, "ab")) {
         std::fprintf(report,
@@ -288,9 +290,7 @@ void MasterSemaphore::SampleFlightRecorder(uint64_t submitted_tick) const {
                      " known_completed=%" PRIu64 "\n",
                      submitted_tick, KnownGpuTick());
         snapshot->Dump(report, KnownGpuTick(), false);
-#if KYTY_DIAGNOSTIC_RUNTIME
         if (m_resource_trace_enabled) resource_snapshot.Dump(report, false);
-#endif
         std::fclose(report);
     }
 }
@@ -301,17 +301,13 @@ void MasterSemaphore::DumpRecentSubmissions() const {
     auto flight_snapshot = m_flight_recorder
                                ? std::make_unique<GpuTrace::FlightRecorder>()
                                : nullptr;
-#if KYTY_DIAGNOSTIC_RUNTIME
     GpuTrace::ResourceLifetimeHistory resource_snapshot;
-#endif
     size_t count = 0;
     {
         std::lock_guard guard(m_traceMutex);
         count = m_traceCount;
         if (flight_snapshot) *flight_snapshot = *m_flight_recorder;
-#if KYTY_DIAGNOSTIC_RUNTIME
         resource_snapshot = m_resource_history;
-#endif
         const size_t oldest = (m_traceHead + TraceCapacity - count) % TraceCapacity;
         for (size_t i = 0; i < count; ++i)
             snapshot[i] = m_trace[(oldest + i) % TraceCapacity];
@@ -329,23 +325,20 @@ void MasterSemaphore::DumpRecentSubmissions() const {
     }
     if (flight_snapshot && flight_snapshot->Count() != 0) {
         flight_snapshot->Dump(stderr, KnownGpuTick());
-#if KYTY_DIAGNOSTIC_RUNTIME
         if (m_resource_trace_enabled) resource_snapshot.Dump(stderr, false);
-#endif
         // Project-local opt-in postmortem log, immune to UI marker truncation.
         const char* report_path = std::getenv("XXII_COMPAT_GPU_FLIGHT_LOG");
         if (report_path != nullptr && report_path[0] != '\0') {
             if (FILE* report = std::fopen(report_path, "ab")) {
                 flight_snapshot->Dump(report, KnownGpuTick(), true, true);
-#if KYTY_DIAGNOSTIC_RUNTIME
                 if (m_resource_trace_enabled) resource_snapshot.Dump(report, true);
-#endif
                 std::fclose(report);
             }
         }
     }
     std::fflush(stderr);
 }
+#endif // KYTY_DIAGNOSTIC_RUNTIME
 
 MasterSemaphore::~MasterSemaphore() {
 	if (m_semaphore != nullptr) {
@@ -360,9 +353,13 @@ void MasterSemaphore::Refresh() {
         ReportSemaphoreError("getCounter", result, 0, CurrentTick(), KnownGpuTick());
         if (result == vk::Result::eErrorDeviceLost) {
             DumpDeviceFault();
+#if KYTY_DIAGNOSTIC_RUNTIME
             DumpCheckpoints();
+#endif
         }
+#if KYTY_DIAGNOSTIC_RUNTIME
         DumpRecentSubmissions();
+#endif
     }
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
@@ -392,9 +389,13 @@ void MasterSemaphore::Wait(uint64_t tick) {
         ReportSemaphoreError("wait", result, tick, CurrentTick(), KnownGpuTick());
         if (result == vk::Result::eErrorDeviceLost) {
             DumpDeviceFault();
+#if KYTY_DIAGNOSTIC_RUNTIME
             DumpCheckpoints();
+#endif
         }
+#if KYTY_DIAGNOSTIC_RUNTIME
         DumpRecentSubmissions();
+#endif
     }
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	Refresh();

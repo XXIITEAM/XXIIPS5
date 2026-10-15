@@ -92,7 +92,9 @@ private:
 	GraphicContext&              m_graphics;
 	CommandPool                  m_command_pool;
 	CommandBuffer                m_command;
+#if KYTY_DIAGNOSTIC_RUNTIME
     uint64_t                     m_checkpoint_serial = 0;
+#endif
 	DynamicState                 m_dynamic_state;
 	std::queue<PendingOperation> m_pending_operations;
 	std::queue<PendingOperation> m_priority_operations;

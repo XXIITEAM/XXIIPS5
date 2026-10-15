@@ -1,0 +1,78 @@
+cmake_minimum_required(VERSION 3.19)
+
+if(NOT EXISTS "${RUNTIME}" OR NOT DEFINED DIAGNOSTIC_RUNTIME)
+	message(FATAL_ERROR "Runtime and explicit diagnostic edition are required")
+endif()
+
+foreach(scenario IN ITEMS unset recorder_off recorder_on recorder_invalid log_empty log_on
+		checkpoint_empty checkpoint_off checkpoint_below checkpoint_on checkpoint_upper checkpoint_above checkpoint_invalid)
+	set(control)
+	set(requested OFF)
+	if("${scenario}" STREQUAL "recorder_off")
+		set(control "XXII_COMPAT_GPU_FLIGHT_RECORDER=0")
+	elseif("${scenario}" STREQUAL "recorder_on")
+		set(control "XXII_COMPAT_GPU_FLIGHT_RECORDER=1")
+		set(requested ON)
+	elseif("${scenario}" STREQUAL "recorder_invalid")
+		set(control "XXII_COMPAT_GPU_FLIGHT_RECORDER=10")
+	elseif("${scenario}" STREQUAL "log_empty")
+		set(control "XXII_COMPAT_GPU_FLIGHT_LOG=")
+	elseif("${scenario}" STREQUAL "log_on")
+		set(control "XXII_COMPAT_GPU_FLIGHT_LOG=unused-command-trace-report.log")
+		set(requested ON)
+	elseif("${scenario}" STREQUAL "checkpoint_off")
+		set(control "XXII_GPU_OP_CHECKPOINT_START=0")
+	elseif("${scenario}" STREQUAL "checkpoint_empty")
+		set(control "XXII_GPU_OP_CHECKPOINT_START=")
+	elseif("${scenario}" STREQUAL "checkpoint_below")
+		set(control "XXII_GPU_OP_CHECKPOINT_START=999")
+	elseif("${scenario}" STREQUAL "checkpoint_on")
+		set(control "XXII_GPU_OP_CHECKPOINT_START=1000")
+		set(requested ON)
+	elseif("${scenario}" STREQUAL "checkpoint_upper")
+		set(control "XXII_GPU_OP_CHECKPOINT_START=10000000")
+		set(requested ON)
+	elseif("${scenario}" STREQUAL "checkpoint_above")
+		set(control "XXII_GPU_OP_CHECKPOINT_START=10000001")
+	elseif("${scenario}" STREQUAL "checkpoint_invalid")
+		set(control "XXII_GPU_OP_CHECKPOINT_START=not-a-tick")
+	endif()
+	foreach(probe IN ITEMS 0 1)
+		execute_process(
+			COMMAND "${CMAKE_COMMAND}" -E env
+				--unset=XXII_COMPAT_GPU_FLIGHT_RECORDER
+				--unset=XXII_COMPAT_GPU_FLIGHT_LOG
+				--unset=XXII_GPU_OP_CHECKPOINT_START
+				--unset=XXII_COMPAT_GPU_RESOURCE_LIFETIME
+				${control} "XXII_COMPAT_PROBE=${probe}"
+				"${RUNTIME}" --help
+			RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error
+			TIMEOUT 15)
+		if(NOT DIAGNOSTIC_RUNTIME AND requested)
+			if(NOT status STREQUAL "2" OR NOT output STREQUAL "" OR NOT error STREQUAL
+					"XXII_RUNTIME_OPTION_UNAVAILABLE edition=RELEASE feature=gpu_command_trace required=DEVELOPER\n")
+				message(FATAL_ERROR "Release must explicitly reject command trace scenario=${scenario}")
+			endif()
+		elseif(NOT status STREQUAL "0" OR NOT error STREQUAL "" OR
+				NOT output MATCHES "kyty_emulator --game")
+			message(FATAL_ERROR "Normal help changed scenario=${scenario}")
+		endif()
+	endforeach()
+endforeach()
+file(STRINGS "${RUNTIME}" markers REGEX "XXII_GPU_(FLIGHT|BREADCRUMB|CHECKPOINT)")
+if(DIAGNOSTIC_RUNTIME)
+	foreach(marker IN ITEMS XXII_GPU_FLIGHT_SUMMARY XXII_GPU_FLIGHT_EVENT XXII_GPU_BREADCRUMB_INIT XXII_GPU_CHECKPOINT_SUPPORT)
+		if(NOT markers MATCHES "${marker}")
+			message(FATAL_ERROR "Developer command diagnostic output missing: ${marker}")
+		endif()
+	endforeach()
+elseif(markers)
+	message(FATAL_ERROR "Release retains command flight/breadcrumb/checkpoint output")
+endif()
+file(STRINGS "${RUNTIME}" required REGEX "XXII_PRESENT_FPS frames=|XXII_GPU_SEMAPHORE_FAILURE|XXII_GPU_DESCRIPTOR_RANGE_INVALID")
+foreach(marker IN ITEMS "XXII_PRESENT_FPS frames=" XXII_GPU_SEMAPHORE_FAILURE XXII_GPU_DESCRIPTOR_RANGE_INVALID)
+	if(NOT required MATCHES "${marker}")
+		message(FATAL_ERROR "Production progress or correctness error missing: ${marker}")
+	endif()
+endforeach()
+message(STATUS "GPU command trace edition contract PASS diagnostic=${DIAGNOSTIC_RUNTIME} controls=26")

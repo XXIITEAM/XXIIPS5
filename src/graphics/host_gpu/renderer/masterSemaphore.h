@@ -3,17 +3,18 @@
 
 #include "common/common.h"
 #include "common/diagnostics/runtimeTelemetry.h"
-#include "graphics/host_gpu/renderer/gpuFlightRecorder.h"
 #if KYTY_DIAGNOSTIC_RUNTIME
+#include "graphics/host_gpu/renderer/gpuFlightRecorder.h"
 #include "graphics/host_gpu/renderer/gpuResourceLifetime.h"
 #endif
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <atomic>
+#if KYTY_DIAGNOSTIC_RUNTIME
 #include <array>
-#include <cstddef>
-#include <mutex>
 #include <memory>
+#include <mutex>
+#endif
 
 namespace Libs::Graphics {
 
@@ -39,6 +40,7 @@ public:
 
 	void Refresh();
 	void Wait(uint64_t tick);
+#if KYTY_DIAGNOSTIC_RUNTIME
     // Runtime-disabled except during explicit compatibility probes. Retain
     // only numeric GPU operation metadata, never guest instructions/shaders.
     void RecordSubmission(uint64_t tick, uint32_t operation, uint64_t submitId,
@@ -47,19 +49,19 @@ public:
                           const GpuTrace::CommandTrace& commands);
     void DumpRecentSubmissions() const;
     void SampleFlightRecorder(uint64_t submitted_tick) const;
-#if KYTY_DIAGNOSTIC_RUNTIME
     void RecordResourceEvent(GpuTrace::ResourceAction action, uint64_t tick,
                              uint64_t retire_tick, uint32_t slot, uint32_t generation,
                              uint32_t format, uint32_t flags, uint64_t bytes);
+    void DumpCheckpoints() const;
 #endif
     void DumpDeviceFault() const;
-    void DumpCheckpoints() const;
 
 private:
 	GraphicContext&       m_graphics;
 	vk::Semaphore         m_semaphore = nullptr;
 	std::atomic<uint64_t> m_gpu_tick {0};
 	std::atomic<uint64_t> m_current_tick {1};
+#if KYTY_DIAGNOSTIC_RUNTIME
     struct SubmittedOperation {
         uint64_t tick = 0;
         uint32_t operation = 0;
@@ -77,7 +79,6 @@ private:
     // A full recorder is about a megabyte. Allocate only in opt-in probes:
     // CommandScheduler can otherwise live on the Windows test thread stack.
     std::unique_ptr<GpuTrace::FlightRecorder> m_flight_recorder;
-#if KYTY_DIAGNOSTIC_RUNTIME
     bool m_resource_trace_enabled = false;
     GpuTrace::ResourceLifetimeHistory m_resource_history;
 #endif

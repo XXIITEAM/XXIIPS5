@@ -1161,6 +1161,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			for (uint32_t mip = 0; mip < resource.mip_count; ++mip) {
 				m_descriptor_images[start + mip] = MakeImageInfo(texture, mip);
 			}
+#if KYTY_DIAGNOSTIC_RUNTIME
 			// Actual descriptor resource metadata, without raw handles or addresses.
 			if (i < 8)
 				buffer.RecordGpuTrace(GpuTrace::Kind::DescriptorImage,
@@ -1175,6 +1176,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 				                      texture.image_id.index, texture.image_id.generation,
 				                      resource.descriptor_index, resource.mip_count,
 				                      static_cast<uint32_t>(texture.layout));
+#endif
             // Binding 24 in a compute pipeline is a floating depth-compare
             // sampled 2D texture. Vulkan VUID-06479 reports R32_SFLOAT
             // there; retain bounded format metadata of the *actual* image
@@ -1238,6 +1240,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	}
 
 	if (!m_descriptor_writes.empty()) {
+#if KYTY_DIAGNOSTIC_RUNTIME
 		for (size_t i = 0; i < std::min<size_t>(m_descriptor_writes.size(), 8); ++i) {
 			const auto& write = m_descriptor_writes[i];
 			buffer.RecordGpuTrace(GpuTrace::Kind::DescriptorBinding,
@@ -1245,14 +1248,17 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			                      static_cast<uint32_t>(write.descriptorType),
 			                      write.dstArrayElement);
 		}
+#endif
 		EXIT_IF(pipeline.descriptor_set_layout == nullptr);
 		if (pipeline.uses_push_descriptors) {
 			vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0,
 			                               static_cast<uint32_t>(m_descriptor_writes.size()),
 			                               m_descriptor_writes.data());
+#if KYTY_DIAGNOSTIC_RUNTIME
 			buffer.RecordGpuTrace(GpuTrace::Kind::DescriptorWrites,
 			                      static_cast<uint32_t>(m_descriptor_writes.size()),
 			                      static_cast<uint32_t>(image_descriptor_count), 1);
+#endif
 		} else {
 			const auto set = m_context.GetDescriptorHeap().Commit(pipeline.descriptor_set_layout);
 			for (auto& write: m_descriptor_writes) {
@@ -1263,9 +1269,11 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			    nullptr);
 			vk_buffer.bindDescriptorSets(pipeline_bind_point, pipeline.pipeline_layout, 0, 1, &set,
 			                             0, nullptr);
+#if KYTY_DIAGNOSTIC_RUNTIME
 			buffer.RecordGpuTrace(GpuTrace::Kind::DescriptorBind,
 			                      static_cast<uint32_t>(m_descriptor_writes.size()),
 			                      static_cast<uint32_t>(image_descriptor_count), 0);
+#endif
 		}
 	}
 }

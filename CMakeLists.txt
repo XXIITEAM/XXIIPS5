@@ -605,6 +605,7 @@ add_executable(gpu_flight_recorder_tests EXCLUDE_FROM_ALL
     "${KYTY_TESTS_DIR}/GpuFlightRecorderTests.cpp"
 )
 target_include_directories(gpu_flight_recorder_tests PRIVATE ${inc_headers})
+target_link_libraries(gpu_flight_recorder_tests PRIVATE Vulkan::Headers)
 
 add_executable(gpu_descriptor_bounds_tests EXCLUDE_FROM_ALL
     "${KYTY_TESTS_DIR}/GpuDescriptorBoundsTests.cpp"
@@ -719,6 +720,16 @@ if(BUILD_TESTING)
 		"-DRUNTIME=$<TARGET_FILE:kyty_emulator>"
 		"-DDIAGNOSTIC_RUNTIME=${kyty_resource_diagnostic}"
 		-P "${KYTY_TESTS_DIR}/GpuResourceLifetimeEdition.cmake")
+	add_test(NAME gpu_command_trace_edition COMMAND ${CMAKE_COMMAND}
+		"-DRUNTIME=$<TARGET_FILE:kyty_emulator>"
+		"-DDIAGNOSTIC_RUNTIME=${kyty_resource_diagnostic}"
+		-P "${KYTY_TESTS_DIR}/GpuCommandTraceEdition.cmake")
+	add_test(NAME gpu_command_trace_capture COMMAND ${CMAKE_COMMAND}
+		"-DFIXTURE=$<TARGET_FILE:shader_recompiler_compute_tests>"
+		"-DDIAGNOSTIC_RUNTIME=${kyty_resource_diagnostic}"
+		-P "${KYTY_TESTS_DIR}/GpuCommandTraceCapture.cmake")
+	set_tests_properties(gpu_command_trace_capture PROPERTIES
+		RESOURCE_LOCK xxii_vulkan_gpu RUN_SERIAL TRUE)
 	if(kyty_resource_diagnostic)
 		add_test(NAME gpu_resource_lifetime_capture COMMAND ${CMAKE_COMMAND}
 			"-DFIXTURE=$<TARGET_FILE:shader_recompiler_compute_tests>"

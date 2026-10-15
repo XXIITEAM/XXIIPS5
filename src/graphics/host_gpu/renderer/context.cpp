@@ -31,6 +31,7 @@ vk::CommandBuffer CommandBuffer::Handle() const {
 
 void CommandBuffer::Begin() {
 	EXIT_IF(m_rendering || IsInvalid());
+#if KYTY_DIAGNOSTIC_RUNTIME
 	m_gpu_trace.Reset();
 	static const bool flight_enabled = [] {
 		const char* probe = std::getenv("XXII_COMPAT_PROBE");
@@ -39,6 +40,7 @@ void CommandBuffer::Begin() {
 		       mode && mode[0] == '1' && mode[1] == '\0';
 	}();
 	m_gpu_trace_enabled = flight_enabled;
+#endif
 	auto buffer = Handle();
 
 	vk::CommandBufferBeginInfo begin_info {};
@@ -67,6 +69,7 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
 	m_debug_arg2      = arg2;
 	m_debug_arg3      = arg3;
 	m_debug_arg4      = arg4;
+#if KYTY_DIAGNOSTIC_RUNTIME
 	RecordGpuTrace(GpuTrace::Kind::GuestBegin, op, arg0, arg1, submit_id, arg4);
     // Optional per-operation GPU execution marker. The ordinary game path
     // remains unchanged unless both an explicit compatibility probe and a
@@ -102,6 +105,7 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
                            static_cast<uintptr_t>(marker)));
         }
     }
+#endif
 }
 
 void CommandBuffer::BeginRendering(const RenderState& state) const {
@@ -148,9 +152,11 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	rendering.pDepthAttachment     = depth_stencil.has_depth ? &depth : nullptr;
 	rendering.pStencilAttachment   = depth_stencil.has_stencil ? &stencil : nullptr;
 	Handle().beginRendering(rendering);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	RecordGpuTrace(GpuTrace::Kind::RenderingBegin, state.width, state.height,
 	               state.num_color_attachments, state.num_layers,
 	               depth_stencil.has_depth ? 1u : 0u);
+#endif
 	m_render_state = state;
 	m_rendering    = true;
 }
@@ -160,7 +166,9 @@ void CommandBuffer::EndRendering() const {
 		return;
 	}
 	Handle().endRendering();
+#if KYTY_DIAGNOSTIC_RUNTIME
 	RecordGpuTrace(GpuTrace::Kind::RenderingEnd);
+#endif
 	m_rendering    = false;
 	m_render_state = {};
 }

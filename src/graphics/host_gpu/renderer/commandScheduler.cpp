@@ -358,6 +358,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	EXIT_IF(!m_command.IsInvalid());
 	m_command.m_buffer = m_command_pool.Commit();
 	m_command.Begin();
+#if KYTY_DIAGNOSTIC_RUNTIME
     // Diagnostic-only execution checkpoint at the START of each Vulkan
     // command buffer, paired with the existing tail checkpoint in Submit().
     // A lost device with begin-but-no-tail narrows the fault to this buffer;
@@ -375,6 +376,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
                            static_cast<uintptr_t>(marker)));
         }
     }
+#endif
 	m_dynamic_state.Invalidate();
 	return m_command;
 }
@@ -384,11 +386,12 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 
+    auto& graphics = m_graphics;
+#if KYTY_DIAGNOSTIC_RUNTIME
     // Each command buffer gets a monotonic opaque marker at its tail.
     // The device extension and its entrypoint must both be available; the
     // normal graphics path is unchanged when diagnostics are disabled.
     uint64_t checkpoint_marker = 0;
-    auto& graphics = m_graphics;
     if (graphics.device_checkpoints_enabled) {
         const auto checkpoint = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
             VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(
@@ -400,6 +403,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
                            static_cast<uintptr_t>(checkpoint_marker)));
         }
     }
+#endif
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
 	EXIT_IF(graphics.queue == nullptr);
@@ -439,18 +443,24 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
     if (result != vk::Result::eSuccess) {
         if (result == vk::Result::eErrorDeviceLost) {
             m_master.DumpDeviceFault();
+#if KYTY_DIAGNOSTIC_RUNTIME
             m_master.DumpCheckpoints();
+#endif
         }
+#if KYTY_DIAGNOSTIC_RUNTIME
         m_master.DumpRecentSubmissions();
+#endif
     }
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
+#if KYTY_DIAGNOSTIC_RUNTIME
     m_master.RecordSubmission(tick, m_command.m_debug_op, m_command.m_debug_submit_id,
                               m_command.m_debug_arg0, m_command.m_debug_arg1,
                               m_command.m_debug_arg2, m_command.m_debug_arg3,
                               m_command.m_debug_arg4, checkpoint_marker,
                               m_command.m_gpu_trace);
     m_master.SampleFlightRecorder(tick);
+#endif
     const auto syncStart = ProbeSerializeAfterTick();
     if (syncStart != 0 && tick >= syncStart) {
         // The current submit was successful. A failing wait now reports the

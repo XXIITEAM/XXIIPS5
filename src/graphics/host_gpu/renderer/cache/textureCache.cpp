@@ -212,7 +212,9 @@ void TextureCache::LogImageLifetime(GpuTrace::ResourceAction action, ImageId id,
 
 ImageId TextureCache::InsertImage(const ImageInfo& info) {
 	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	m_slot_images[id].SetDiagnosticId(id);
+#endif
 	if (!info.data.Empty()) {
 		RegisterImage(id);
 	}
@@ -1338,12 +1340,14 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		}
 		image.tick_accessed_last = m_scheduler.CurrentTick();
 		TouchImage(image);
+#if KYTY_DIAGNOSTIC_RUNTIME
 		if (m_scheduler.Active())
 			m_scheduler.Current().RecordGpuTrace(
 			    GpuTrace::Kind::ImageLookup, result.index, result.generation,
 			    static_cast<uint32_t>(desc.type),
 			    static_cast<uint32_t>(image.info.pixel_format),
 			    image.backing.image != nullptr ? 1u : 0u);
+#endif
 	}
 	MaterializeColorClear(result, desc, metadata_base_layer);
 	if (desc.type == BindingType::VideoOut &&
@@ -1447,12 +1451,14 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 		default: EXIT("TextureCache: invalid texture binding\n");
 	}
 	const auto view = image.FindView(desc.view_info);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	if (m_scheduler.Active())
 		m_scheduler.Current().RecordGpuTrace(
 		    GpuTrace::Kind::ImageViewBound, id.index, id.generation,
 		    static_cast<uint32_t>(desc.type),
 		    static_cast<uint32_t>(image.backing.format),
 		    static_cast<uint32_t>(desc.view_info.format));
+#endif
 	return view;
 }
 
@@ -1472,12 +1478,14 @@ vk::ImageView TextureCache::FindRenderTarget(ImageId id, const ImageDesc& desc) 
 	CommitGpuWrite(image);
 	TrackImageDownload(id, image);
 	const auto view = image.FindView(desc.view_info);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	if (m_scheduler.Active())
 		m_scheduler.Current().RecordGpuTrace(
 		    GpuTrace::Kind::ImageViewBound, id.index, id.generation,
 		    static_cast<uint32_t>(desc.type),
 		    static_cast<uint32_t>(image.backing.format),
 		    static_cast<uint32_t>(desc.view_info.format));
+#endif
 	return view;
 }
 
@@ -1518,12 +1526,14 @@ vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 		RefreshImage(AssociateStencil(id, desc.info.stencil));
 	}
 	const auto view = image.FindView(desc.view_info);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	if (m_scheduler.Active())
 		m_scheduler.Current().RecordGpuTrace(
 		    GpuTrace::Kind::ImageViewBound, id.index, id.generation,
 		    static_cast<uint32_t>(desc.type),
 		    static_cast<uint32_t>(image.backing.format),
 		    static_cast<uint32_t>(desc.view_info.format));
+#endif
 	return view;
 }
 

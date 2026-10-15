@@ -206,6 +206,7 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 	return barriers;
 }
 
+#if KYTY_DIAGNOSTIC_RUNTIME
 void Image::RecordBarrierDiagnostics(std::span<const vk::ImageMemoryBarrier2> barriers) const {
     if (!m_diagnostic_id || barriers.empty()) return;
     // Each snapshot is captured *after* the actual vkCmdPipelineBarrier2 call,
@@ -255,6 +256,7 @@ void Image::RecordBarrierDiagnostics(std::span<const vk::ImageMemoryBarrier2> ba
         }
     }
 }
+#endif
 void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
                     std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer) {
 	const auto transfer_access =
@@ -278,7 +280,9 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 	dependency.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
 	dependency.pImageMemoryBarriers    = barriers.data();
 	command_buffer.pipelineBarrier2(dependency);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	RecordBarrierDiagnostics(barriers);
+#endif
 }
 
 void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
@@ -306,7 +310,9 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
 	dependency.pImageMemoryBarriers     = image_barriers.data();
 	auto command                        = m_scheduler.Current().Handle();
 	command.pipelineBarrier2(dependency);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	RecordBarrierDiagnostics(image_barriers);
+#endif
 	command.copyBufferToImage(buffer, backing.image, vk::ImageLayout::eTransferDstOptimal,
 	                          static_cast<uint32_t>(copies.size()), copies.data());
 	buffer_barrier.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
@@ -347,7 +353,9 @@ void Image::Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buf
 	dependency.pImageMemoryBarriers     = image_barriers.data();
 	auto command                        = m_scheduler.Current().Handle();
 	command.pipelineBarrier2(dependency);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	RecordBarrierDiagnostics(image_barriers);
+#endif
 	command.copyImageToBuffer(backing.image, vk::ImageLayout::eTransferSrcOptimal, buffer,
 	                          static_cast<uint32_t>(copies.size()), copies.data());
 	buffer_barrier.srcStageMask  = vk::PipelineStageFlagBits2::eCopy;

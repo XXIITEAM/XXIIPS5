@@ -1,6 +1,9 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_GPUFLIGHTRECORDER_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_GPUFLIGHTRECORDER_H_
 
+#include "common/diagnostics/runtimeTelemetry.h"
+
+#if KYTY_DIAGNOSTIC_RUNTIME
 #include <algorithm>
 #include <array>
 #include <cinttypes>
@@ -249,4 +252,5 @@ private:
 
 } // namespace Libs::Graphics::GpuTrace
 
+#endif // KYTY_DIAGNOSTIC_RUNTIME
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_GPUFLIGHTRECORDER_H_

@@ -494,8 +494,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                         thread_group_x, thread_group_y, thread_group_z, mode,
                         program.shader_hash);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	buffer.RecordGpuTrace(GpuTrace::Kind::ComputePipeline, 0, 0, 0, program.shader_hash);
 	buffer.RecordGpuTrace(GpuTrace::Kind::ComputeShader, 0, 0, 0, program.shader_hash);
+#endif
     // Only an explicitly requested compatibility probe may omit execution
     // of a single compute shader. This destroys guest rendering dependencies
     // and is strictly a root-cause isolation test, never a shippable fix.
@@ -521,8 +523,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
         }
     } else {
         vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+#if KYTY_DIAGNOSTIC_RUNTIME
         buffer.RecordGpuTrace(GpuTrace::Kind::Dispatch, thread_group_x,
                               thread_group_y, thread_group_z, program.shader_hash);
+#endif
     }
 
 	// The removed host fence also ordered read-only dispatches before later writers.
@@ -589,11 +593,15 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
                         static_cast<uint32_t>(args_addr >> 32u),
                         0, mode, program.shader_hash);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	buffer.RecordGpuTrace(GpuTrace::Kind::ComputePipeline, 0, 0, 0, program.shader_hash);
 	buffer.RecordGpuTrace(GpuTrace::Kind::ComputeShader, 0, 0, 0, program.shader_hash);
+#endif
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	buffer.RecordGpuTrace(GpuTrace::Kind::DispatchIndirect, 1, 0, 0,
 	                      program.shader_hash, args_offset);
+#endif
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 }

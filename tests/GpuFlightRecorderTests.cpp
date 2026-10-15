@@ -1,4 +1,7 @@
 #include "graphics/host_gpu/renderer/gpuFlightRecorder.h"
+#include "graphics/host_gpu/renderer/masterSemaphore.h"
+#include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/renderer/image/image.h"
 
 #include <cstdio>
 #include <memory>
@@ -6,6 +9,22 @@
 #include <cstring>
 
 using namespace Libs::Graphics::GpuTrace;
+
+template <typename T>
+concept HasSubmissionHistory = requires { &T::RecordSubmission; };
+template <typename T>
+concept HasCommandTrace = requires { &T::RecordGpuTrace; };
+template <typename T>
+concept HasDiagnosticImageId = requires { &T::SetDiagnosticId; };
+template <typename T>
+concept HasGpuCheckpoints = requires(T& value) { value.device_checkpoints_enabled; };
+template <typename T>
+concept HasCheckpointDump = requires { &T::DumpCheckpoints; };
+static_assert(HasSubmissionHistory<Libs::Graphics::MasterSemaphore>);
+static_assert(HasCommandTrace<Libs::Graphics::CommandBuffer>);
+static_assert(HasDiagnosticImageId<Libs::Graphics::Image>);
+static_assert(HasGpuCheckpoints<Libs::Graphics::GraphicContext>);
+static_assert(HasCheckpointDump<Libs::Graphics::MasterSemaphore>);
 
 void Require(bool ok, const char* label) {
     if (!ok) {
@@ -90,26 +109,31 @@ int main() {
     Require(std::strcmp(Name(Kind::DescriptorImageIdentity), "descriptor_image_id") == 0,
             "resource identity event");
     Require(std::strcmp(Name(static_cast<Kind>(0)), "unknown") == 0, "unknown op");
-    FILE* report = std::tmpfile();
-    Require(report != nullptr, "create temporary report");
+    constexpr const char* report_name = "gpu-flight-test-report.txt";
+    FILE* report = std::fopen(report_name, "w+bx");
+    Require(report != nullptr, "create exclusive project-local report");
     recorder->Dump(report, 20);
     std::rewind(report);
     char output[12000] {};
     const size_t bytes = std::fread(output, 1, sizeof(output)-1, report);
     std::fclose(report);
+    Require(std::remove(report_name) == 0, "remove project-local report");
     Require(bytes > 0, "report nonempty");
     Require(std::strstr(output, "first_unconfirmed=21") != nullptr, "fault boundary");
     Require(std::strstr(output, "kind=draw_indexed a=2550") != nullptr, "real command");
     Require(std::strstr(output, "tick=21 completed=0") != nullptr, "in flight bound");
     Require(std::strstr(output, "XXII_GPU_FLIGHT_PRIMARY tick=21") != nullptr, "primary fault marker");
-    FILE* success_report = std::tmpfile();
-    Require(success_report != nullptr, "healthy sample temp file");
+    FILE* success_report = std::fopen(report_name, "w+bx");
+    Require(success_report != nullptr, "healthy project-local report");
     recorder->Dump(success_report, 20, false);
     std::rewind(success_report);
     char healthy_output[12000] {};
     (void)std::fread(healthy_output, 1, sizeof(healthy_output)-1, success_report);
     std::fclose(success_report);
+    Require(std::remove(report_name) == 0, "remove project-local healthy report");
     Require(std::strstr(healthy_output, "XXII_GPU_FLIGHT_PRIMARY") == nullptr,
             "healthy GPU in-flight is not a fault");
-    std::puts("GPU flight recorder tests passed");
+    std::printf("GPU flight recorder tests passed master_bytes=%zu command_bytes=%zu image_bytes=%zu\n",
+                sizeof(Libs::Graphics::MasterSemaphore),
+                sizeof(Libs::Graphics::CommandBuffer), sizeof(Libs::Graphics::Image));
 }

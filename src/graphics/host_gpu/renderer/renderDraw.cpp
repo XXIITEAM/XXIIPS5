@@ -1299,6 +1299,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
         }
     }
 
+#if KYTY_DIAGNOSTIC_RUNTIME
     // GPU execution-stage markers inside the watched draw. Multiple markers
     // distinguish resource binding, dynamic rendering and primitive execution.
     // They are diagnostic-only, and are never added to normal game sessions.
@@ -1320,6 +1321,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
         insert(static_cast<VkCommandBuffer>(vk_buffer),
                reinterpret_cast<const void*>(static_cast<uintptr_t>(marker)));
     };
+#endif
     static std::atomic_bool reported_fingerprint {false};
     if (((watched_fingerprint != 0 && shader_fingerprint == watched_fingerprint) ||
          watched_count_match) &&
@@ -1400,16 +1402,22 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
     }
 	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u,
                       shader_fingerprint);
+#if KYTY_DIAGNOSTIC_RUNTIME
     draw_checkpoint(0); // before resource/buffer commands
+#endif
 	if (!mesh_active) {
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
 	}
+#if KYTY_DIAGNOSTIC_RUNTIME
     draw_checkpoint(1); // vertex buffer commands recorded
+#endif
 	if (state.ps_active && !draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u, shader_fingerprint);
 	}
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+#if KYTY_DIAGNOSTIC_RUNTIME
     draw_checkpoint(2); // descriptor commands recorded
+#endif
 	if (mesh_active) {
 		const uint32_t draw_data[] {
 		    draw.index_count,
@@ -1424,29 +1432,38 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                        0, sizeof(draw_data), draw_data);
 	} else {
 		CommitIndexBuffer(vk_buffer, index_binding);
+#if KYTY_DIAGNOSTIC_RUNTIME
 		if (index_binding.buffer != nullptr)
 			buffer.RecordGpuTrace(GpuTrace::Kind::IndexBuffer,
 			                      draw.index_count,
 			                      static_cast<uint32_t>(index_binding.type),
 			                      static_cast<uint32_t>(index_source.size),
 			                      index_binding.offset);
+#endif
 	}
+#if KYTY_DIAGNOSTIC_RUNTIME
     draw_checkpoint(3); // index buffer bound
+#endif
 
 	auto& dynamic_state = m_context.GetCommandScheduler().GetDynamicState();
 	UpdateGraphicsDynamicState(buffer, dynamic_state, vertex_stages.back(), state.depth_info,
 	                           rendering);
 	dynamic_state.SetAttachmentFeedbackLoopAspects(feedback_aspects);
 	dynamic_state.Commit(m_context.GetGraphics(), vk_buffer);
+#if KYTY_DIAGNOSTIC_RUNTIME
     draw_checkpoint(4); // dynamic state before rendering
+#endif
 
 	LogDrawPhase(draw.Name(), "BeginRendering");
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u, shader_fingerprint);
 	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
+#if KYTY_DIAGNOSTIC_RUNTIME
     draw_checkpoint(5); // rendering begun
+#endif
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+#if KYTY_DIAGNOSTIC_RUNTIME
 	buffer.RecordGpuTrace(GpuTrace::Kind::GraphicsPipeline, shader_fingerprint,
 	                      state.color_count, state.depth_info.image_id ? 1u : 0u);
 	if (const auto* vs = state.vertex_info[0].stage.program)
@@ -1473,24 +1490,33 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
             risk_flags);
     }
     draw_checkpoint(6); // pipeline bound
+#endif
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u, shader_fingerprint);
 	}
+#if KYTY_DIAGNOSTIC_RUNTIME
     draw_checkpoint(7); // before the primitive
+#endif
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
+#if KYTY_DIAGNOSTIC_RUNTIME
 		buffer.RecordGpuTrace(GpuTrace::Kind::DrawMesh, mesh_groups,
 		                      draw.instance_count, 1, shader_fingerprint);
+#endif
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
+#if KYTY_DIAGNOSTIC_RUNTIME
 		buffer.RecordGpuTrace(draw.IsIndexed() ? GpuTrace::Kind::DrawIndexed
 		                                      : GpuTrace::Kind::Draw,
 		                      draw.index_count, draw.instance_count,
 		                      static_cast<uint32_t>(ucfg.GetPrimType()),
 		                      shader_fingerprint,
 		                      static_cast<uint32_t>(emit.vertex_offset));
+#endif
 	}
+#if KYTY_DIAGNOSTIC_RUNTIME
     draw_checkpoint(8); // after the primitive
+#endif
 
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u, shader_fingerprint);
@@ -1509,7 +1535,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		ShaderWriteBarrier(vk_buffer, shader_write_stages);
 	}
 	LogDrawPhase(draw.Name(), "DrawComplete");
+#if KYTY_DIAGNOSTIC_RUNTIME
     draw_checkpoint(9); // draw + buffer-write barrier complete
+#endif
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u, shader_fingerprint);
 	}

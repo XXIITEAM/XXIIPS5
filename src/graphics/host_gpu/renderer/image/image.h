@@ -3,6 +3,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/diagnostics/runtimeTelemetry.h"
 #include "common/slotVector.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
@@ -52,8 +53,10 @@ public:
 	~Image();
 	KYTY_CLASS_NO_COPY(Image);
 
+#if KYTY_DIAGNOSTIC_RUNTIME
 	// Cache-owned stable slot and generation for CPU-only diagnostic markers.
 	void SetDiagnosticId(ImageId id) noexcept { m_diagnostic_id = id; }
+#endif
 	[[nodiscard]] vk::ImageView FindView(const ImageViewInfo& view_info);
 	using Barriers = std::vector<vk::ImageMemoryBarrier2>;
 	[[nodiscard]] Barriers GetBarriers(vk::ImageLayout                      destination_layout,
@@ -158,7 +161,9 @@ public:
 
 private:
 	friend struct ImageTestAccess;
+#if KYTY_DIAGNOSTIC_RUNTIME
 	void RecordBarrierDiagnostics(std::span<const vk::ImageMemoryBarrier2> barriers) const;
+#endif
 
 	[[nodiscard]] static vk::ImageAspectFlags FullAspectMask(vk::Format format) noexcept;
 	[[nodiscard]] static uint32_t             CopyRows(uint64_t row_size, uint32_t rows,
@@ -166,7 +171,9 @@ private:
 	[[nodiscard]] static std::pair<uint32_t, uint32_t>
 	SanitizeCopyLayers(const Image& source, const Image& destination, uint32_t depth);
 
+#if KYTY_DIAGNOSTIC_RUNTIME
 	ImageId           m_diagnostic_id {};
+#endif
 	GraphicContext&   m_graphics;
 	CommandScheduler& m_scheduler;
 	uint64_t          m_maybe_cpu_hash   = 0;
