@@ -22,7 +22,8 @@
 
 namespace Common::HleWaitSnapshot {
 constexpr uint32_t Magic = 0x57583232;
-constexpr uint32_t Version = 1;
+// Bumped: nonce-bound producer handshake and per-slot generation are required.
+constexpr uint32_t Version = 2;
 constexpr uint32_t Capacity = 256;
 constexpr uint32_t TopWaits = 12;
 
@@ -69,25 +70,63 @@ struct alignas(8) Slot {
     volatile LONG thread;
     alignas(8) volatile LONG64 call;
     alignas(8) volatile LONG64 startedMs;
+    alignas(8) volatile LONG64 generation; // detect slot reuse during a snapshot
 };
 struct alignas(8) Table {
     uint32_t magic, version, capacity;
-    volatile LONG guestConnected;
+    uint32_t reserved = 0;
+    alignas(8) uint64_t nonceHigh, nonceLow; // parent-minted, never exported
+    volatile LONG guestPid;                 // claimed by nonce-bound child
+    volatile LONG guestAuthenticated;
+    volatile LONG guestConnected;           // published LAST by guest
     volatile LONG cursor, dropped;
     Slot records[Capacity];
 };
 static_assert(std::is_trivially_copyable_v<Table> && std::is_standard_layout_v<Table>);
 static_assert(sizeof(Table) < 65536);
-inline void Initialize(Table* table) noexcept {
+inline void Initialize(Table* table, uint64_t nonceHigh, uint64_t nonceLow) noexcept {
     if (!table) return;
     std::memset(table, 0, sizeof(Table)); // before child opens view
+    table->nonceHigh = nonceHigh;
+    table->nonceLow = nonceLow;
     table->magic = Magic;
     table->version = Version;
     table->capacity = Capacity;
 }
+// Exactly 128 bits, hexadecimal; the token itself must never enter a log,
+// evidence archive, Knowledge Core or UI view.
+inline bool ParseNonce(const char* text, uint64_t* high, uint64_t* low) noexcept {
+    if (!text || !high || !low || std::strlen(text) != 32) return false;
+    uint64_t a = 0, b = 0;
+    for (int i = 0; i < 32; ++i) {
+        const char c = text[i];
+        const unsigned value = c >= '0' && c <= '9' ? unsigned(c - '0') :
+                               c >= 'a' && c <= 'f' ? unsigned(c - 'a' + 10) :
+                               c >= 'A' && c <= 'F' ? unsigned(c - 'A' + 10) : 16u;
+        if (value == 16u) return false;
+        if (i < 16) a = (a << 4) | value;
+        else b = (b << 4) | value;
+    }
+    if ((a | b) == 0) return false;
+    *high = a;
+    *low = b;
+    return true;
+}
 inline bool Valid(const Table* table) noexcept {
     return table && table->magic == Magic && table->version == Version &&
            table->capacity == Capacity;
+}
+// Binding asserts possession of this session's launch challenge. This is
+// NOT cryptographic attestation against arbitrary same-user processes.
+inline bool BindGuest(Table* table, uint64_t high, uint64_t low,
+                      uint32_t pid) noexcept {
+    if (!Valid(table) || !pid || ((high | low) == 0) ||
+        ((table->nonceHigh ^ high) | (table->nonceLow ^ low))) return false;
+    if (InterlockedCompareExchange(&table->guestPid, static_cast<LONG>(pid), 0) != 0)
+        return false;
+    InterlockedExchange(&table->guestAuthenticated, 1);
+    InterlockedExchange(&table->guestConnected, 1);
+    return true;
 }
 struct Ticket { Slot* slot = nullptr; };
 
@@ -129,7 +168,18 @@ inline Table* RuntimeTable() noexcept {
             }
             if (name[i] == '\0') {
                 result = OpenNamed(wide);
-                if (result) InterlockedExchange(&result->guestConnected, 1);
+                if (result) {
+                    char* launchNonce = nullptr;
+                    size_t nonceLen = 0;
+                    uint64_t high = 0, low = 0;
+                    const bool ok =
+                        _dupenv_s(&launchNonce, &nonceLen,
+                                  "XXII_COMPAT_HLE_WAIT_NONCE") == 0 &&
+                        ParseNonce(launchNonce, &high, &low) &&
+                        BindGuest(result, high, low, GetCurrentProcessId());
+                    std::free(launchNonce);
+                    if (!ok) { UnmapViewOfFile(result); result = nullptr; }
+                }
             }
         }
         std::free(name);
@@ -155,6 +205,9 @@ inline Ticket Enter(Table* table, uint64_t call, Operation op, Mode mode,
         InterlockedExchange(&slot->thread, static_cast<LONG>(tid));
         InterlockedExchange64(&slot->call, static_cast<LONG64>(call));
         InterlockedExchange64(&slot->startedMs, static_cast<LONG64>(tickMs));
+        // A reused slot can transition active->free->active while a reader
+        // copies fields. A generation change makes such ABA races visible.
+        InterlockedIncrement64(&slot->generation);
         InterlockedExchange(&slot->state, 2);
         return {slot};
     };
@@ -179,6 +232,7 @@ struct Sample {
 };
 struct Snapshot {
     uint32_t outstanding = 0, omitted = 0, dropped = 0, count = 0;
+    uint32_t unstable = 0, invalid = 0;
     bool connected = false;
     std::array<Sample, TopWaits> oldest {};
 };
@@ -192,17 +246,27 @@ inline Snapshot Inspect(const Table* table, uint64_t tickMs) noexcept {
         return InterlockedCompareExchange64(const_cast<volatile LONG64*>(p), 0, 0);
     };
     result.dropped = static_cast<uint32_t>(r32(&table->dropped));
-    result.connected = r32(&table->guestConnected) != 0;
+    result.connected = r32(&table->guestConnected) == 1 &&
+                       r32(&table->guestAuthenticated) == 1 &&
+                       r32(&table->guestPid) != 0;
     for (const auto& slot : table->records) {
         if (r32(&slot.state) != 2) continue;
+        const auto epoch = r64(&slot.generation);
         const auto call = static_cast<uint64_t>(r64(&slot.call));
         const auto op = static_cast<Operation>(r32(&slot.operation));
         const auto mode = static_cast<Mode>(r32(&slot.mode));
         const auto thread = static_cast<uint32_t>(r32(&slot.thread));
         const auto started = static_cast<uint64_t>(r64(&slot.startedMs));
-        if (call == 0 || r32(&slot.state) != 2 ||
-            static_cast<uint64_t>(r64(&slot.call)) != call ||
-            op == Operation::Unknown || started > tickMs) continue;
+        if (r32(&slot.state) != 2 || r64(&slot.generation) != epoch) {
+            ++result.unstable;
+            continue;
+        }
+        if (call == 0 || op == Operation::Unknown ||
+            (mode != Mode::Infinite && mode != Mode::Timed) ||
+            started > tickMs) {
+            ++result.invalid;
+            continue;
+        }
         const Sample sample {op, mode, thread, call, tickMs - started};
         ++result.outstanding;
         if (result.count == TopWaits &&

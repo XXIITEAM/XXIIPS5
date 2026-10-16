@@ -6,6 +6,8 @@
 #include <cstring>
 #include <string>
 #include <array>
+#include <atomic>
+#include <thread>
 
 namespace {
 void Require(bool condition, const char* title) {
@@ -99,7 +101,10 @@ int main(int argc, char** argv) {
         MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0,
                       sizeof(Common::HleWaitSnapshot::Table)));
     Require(table != nullptr, "map HLE wait snapshot");
-    Common::HleWaitSnapshot::Initialize(table);
+    constexpr uint64_t nonceHigh = 0x123456789abcdef0ULL;
+    constexpr uint64_t nonceLow = 0x0fedcba987654321ULL;
+    constexpr char nonceHex[] = "123456789abcdef00fedcba987654321";
+    Common::HleWaitSnapshot::Initialize(table, nonceHigh, nonceLow);
     using namespace Common::HleWaitSnapshot;
     Require(!Inspect(table, GetTickCount64()).connected,
             "mapping creation alone is not guest connection");
@@ -120,7 +125,7 @@ int main(int argc, char** argv) {
             "distributed probing avoids artificial slot loss");
     Leave(rescued);
     for (auto ticket : clustered) Leave(ticket);
-    Initialize(table);
+    Initialize(table, nonceHigh, nonceLow);
 
     std::array<Ticket, Capacity> tickets {};
     for (uint32_t i = 0; i < Capacity; ++i) {
@@ -140,7 +145,39 @@ int main(int argc, char** argv) {
     for (auto ticket : tickets) Leave(ticket);
     Require(Inspect(table, now).outstanding == 0, "released waits disappear");
 
+    uint64_t parsedHigh = 0, parsedLow = 0;
+    Require(ParseNonce(nonceHex, &parsedHigh, &parsedLow) &&
+            parsedHigh == nonceHigh && parsedLow == nonceLow &&
+            !ParseNonce("00000000000000000000000000000000", &parsedHigh, &parsedLow) &&
+            !ParseNonce("1234", &parsedHigh, &parsedLow),
+            "nonce parser rejects missing/invalid/zero launch challenge");
+    Require(!BindGuest(table, nonceHigh ^ 1u, nonceLow, GetCurrentProcessId()) &&
+            !Inspect(table, GetTickCount64()).connected,
+            "wrong challenge never publishes a guest session");
+
+    // Bounded ABA regression test: rapidly reuse a slot from a writer while
+    // the reader snapshots it. A coherent sample must never mix call/tid.
+    std::atomic<bool> writing {true};
+    std::thread writer([&] {
+        for (uint32_t i = 1; i <= 8000; ++i) {
+            auto ticket = Enter(table, i, Operation::Semaphore, Mode::Timed,
+                                GetTickCount64(), i);
+            if (ticket.slot) Leave(ticket);
+        }
+        writing.store(false, std::memory_order_release);
+    });
+    bool coherent = true;
+    for (int i = 0; i < 8000 || writing.load(std::memory_order_acquire); ++i) {
+        const auto shot = Inspect(table, GetTickCount64());
+        for (uint32_t j = 0; j < shot.count; ++j) {
+            if (shot.oldest[j].call != shot.oldest[j].thread) coherent = false;
+        }
+    }
+    writer.join();
+    Require(coherent, "slot ABA race never returns mixed call/thread pairs");
+
     Require(_putenv_s("XXII_COMPAT_HLE_WAIT_MAP", mappingName.c_str()) == 0 &&
+            _putenv_s("XXII_COMPAT_HLE_WAIT_NONCE", nonceHex) == 0 &&
             _putenv_s("XXII_COMPAT_HLE_TRIAGE", "1") == 0,
             "publish snapshot mapping for child");
     char executable[MAX_PATH] {};
@@ -150,6 +187,27 @@ int main(int argc, char** argv) {
                             "\" --wait-snapshot-child";
     STARTUPINFOA startup {};
     startup.cb = sizeof(startup);
+    // The first child gets an invalid launch secret. It must never mark
+    // the shared mapping connected or publish HLE slots.
+    Require(_putenv_s("XXII_COMPAT_HLE_WAIT_NONCE",
+                      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") == 0,
+            "inject invalid challenge into synthetic guest only");
+    PROCESS_INFORMATION denied {};
+    auto deniedArgs = arguments;
+    Require(CreateProcessA(nullptr, deniedArgs.data(), nullptr, nullptr,
+                           FALSE, CREATE_NO_WINDOW, nullptr, nullptr,
+                           &startup, &denied) != 0,
+            "launch unauthorized guest-style child");
+    Require(WaitForSingleObject(denied.hProcess, 3000) == WAIT_OBJECT_0,
+            "unauthorized child failed closed without blocking");
+    DWORD deniedExit = ~0UL;
+    Require(GetExitCodeProcess(denied.hProcess, &deniedExit) &&
+            deniedExit == 31 && !Inspect(table, GetTickCount64()).connected,
+            "wrong challenge rejected across a real process boundary");
+    CloseHandle(denied.hThread);
+    CloseHandle(denied.hProcess);
+    Require(_putenv_s("XXII_COMPAT_HLE_WAIT_NONCE", nonceHex) == 0,
+            "restore valid challenge for authorized guest");
     PROCESS_INFORMATION child {};
     Require(CreateProcessA(nullptr, arguments.data(), nullptr, nullptr,
                            FALSE, CREATE_NO_WINDOW, nullptr, nullptr,
@@ -166,8 +224,11 @@ int main(int argc, char** argv) {
         Sleep(20);
     }
     const auto pending = Inspect(table, GetTickCount64());
-    Require(sawChildWait && pending.connected && pending.count >= 1,
-            "parent sees guest-confirmed unsampled child wait");
+    Require(sawChildWait && pending.connected && pending.count >= 1 &&
+            InterlockedCompareExchange(&table->guestAuthenticated, 0, 0) == 1 &&
+            static_cast<DWORD>(InterlockedCompareExchange(&table->guestPid, 0, 0)) ==
+                child.dwProcessId,
+            "parent sees nonce-bound real child PID and coherent HLE wait");
     Require(WaitForSingleObject(child.hProcess, 5000) == WAIT_OBJECT_0,
             "child returned from wait");
     DWORD exitCode = ~0UL;
