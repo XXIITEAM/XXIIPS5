@@ -1177,6 +1177,32 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 				                      resource.descriptor_index, resource.mip_count,
 				                      static_cast<uint32_t>(texture.layout));
 #endif
+#if KYTY_DIAGNOSTIC_RUNTIME
+            // Opt-in, diagnostic-only: report the *actual* cached image view
+            // used by any observed depth-comparison descriptor, not just
+            // native binding 24. Never record Vulkan handles or game content.
+            const char* depth_probe = std::getenv("XXII_COMPAT_PROBE");
+            if (i < 8 && resource.depth_compare && resource.mip_count != 0 &&
+                depth_probe && depth_probe[0] == '1' && depth_probe[1] == '\0') {
+                const auto& cached = m_context.GetTextureCache().GetImage(texture.image_id);
+                const auto vk_view = m_descriptor_images[start].imageView;
+                const auto view_it = std::ranges::find(
+                    cached.views, vk_view, &CachedImageView::view);
+                const auto actual_format = view_it == cached.views.end()
+                    ? vk::Format::eUndefined : view_it->info.format;
+                const auto actual_aspect = view_it == cached.views.end()
+                    ? 0u : static_cast<uint32_t>(view_it->info.aspect);
+                const uint64_t actual = (uint64_t {static_cast<uint32_t>(actual_format)} << 32u) |
+                                        actual_aspect;
+                const uint64_t requested = (
+                    uint64_t {static_cast<uint32_t>(texture.desc.view_info.format)} << 32u) |
+                    ShaderRecompiler::IR::NativeBinding(program.stage, kind);
+                buffer.RecordGpuTrace(GpuTrace::Kind::DepthCompareView,
+                                      texture.image_id.index, texture.image_id.generation,
+                                      static_cast<uint32_t>(program.stage),
+                                      actual, requested);
+            }
+#endif
             // Binding 24 in a compute pipeline is a floating depth-compare
             // sampled 2D texture. Vulkan VUID-06479 reports R32_SFLOAT
             // there; retain bounded format metadata of the *actual* image

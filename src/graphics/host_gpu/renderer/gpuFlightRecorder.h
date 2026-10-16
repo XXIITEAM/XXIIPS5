@@ -45,6 +45,8 @@ enum class Kind : uint32_t {
     ImageBarrierAccess,
     ImageBarrierSubresource,
     ShaderResourceShape,
+    // Opt-in: actual depth-comparison VkImageView metadata, never handles.
+    DepthCompareView,
 };
 
 inline const char* Name(Kind kind) noexcept {
@@ -77,6 +79,7 @@ inline const char* Name(Kind kind) noexcept {
         case Kind::ImageBarrierAccess: return "image_barrier_access";
         case Kind::ImageBarrierSubresource: return "image_barrier_subresource";
         case Kind::ShaderResourceShape: return "shader_resource_shape";
+        case Kind::DepthCompareView: return "depth_compare_view";
     }
     return "unknown";
 }
