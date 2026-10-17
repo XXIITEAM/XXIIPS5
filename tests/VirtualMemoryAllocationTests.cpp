@@ -3203,6 +3203,13 @@ void TestProgramMemoryAllocationAndProtection() {
 }
 
 #if KYTY_DIAGNOSTIC_RUNTIME
+void TestRuntimeMemoryFullSpanSummary() {
+    const char* test = "RuntimeMemoryFullSpanSummary";
+    Check(test, Loader::TestRuntimeMemoryFullSpanSummary(),
+          "bounded full-span Code/Win32 sample, splitting, cap, and free checks failed");
+    std::printf("[host]    %-48s ok\n", test);
+}
+
 void TestRuntimeMemoryMapEndpointSampling() {
 	const char* test = "RuntimeMemoryMapEndpointSampling";
 	Check(test, Loader::TestRuntimeMemoryMapEndpointSampling(),
@@ -4545,6 +4552,7 @@ int main(int argc, char** argv) {
 	RunTest(TestModuleRelocationUsesWritableHostMapping);
 #if KYTY_DIAGNOSTIC_RUNTIME
 	RunTest(TestRuntimeMemoryMapEndpointSampling);
+	RunTest(TestRuntimeMemoryFullSpanSummary);
 #endif
 
 	if (g_failed_tests != 0) {

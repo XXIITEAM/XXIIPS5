@@ -208,6 +208,7 @@ bool TestMainEntryUsesGuestStack();
 bool TestModuleRelocationUsesWritableHostMapping();
 #if KYTY_DIAGNOSTIC_RUNTIME
 bool TestRuntimeMemoryMapEndpointSampling();
+bool TestRuntimeMemoryFullSpanSummary();
 #endif
 #endif
 

@@ -190,6 +190,19 @@ bool     ProtectGuestMemory(uint64_t vaddr, uint64_t size, Common::VirtualMemory
 bool ProtectGuestHostMemory(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode mode);
 bool FreeGuestMemory(uint64_t vaddr, uint64_t size);
 
+// Developer-only, read-only scan of Kyty's Code semantic mappings under
+// the same memory-operation lock as allocations/protection changes.
+// No addresses, names, bytes or page content are exported in the summary.
+#if KYTY_DIAGNOSTIC_RUNTIME
+struct ProgramMappingSpanSummary {
+    uint32_t regions = 0;
+    bool full = false;
+    bool mixed_protections = false;
+    bool capped = false;
+};
+ProgramMappingSpanSummary InspectProgramMappingSpan(uint64_t vaddr, uint64_t size);
+#endif
+
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 void     TestBeforeNextBackingMap(callback_func_t callback);
 void     TestSetBackingReadCallback(callback_func_t callback);

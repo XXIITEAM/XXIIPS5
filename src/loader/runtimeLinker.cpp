@@ -1709,6 +1709,52 @@ static bool SampleHostEndpoints(uint64_t addr, uint64_t size, uint32_t* mode_out
 	return false; // no Win32 host sample on other platforms in this increment
 #endif
 }
+// B1e: sequential, bounded Win32 region scan; no payload or addresses escape.
+// This is NOT a coherent atomic snapshot with Kyty's semantic range registry.
+struct HostSpanSummary {
+    uint32_t regions = 0;
+    bool full = false;
+    bool mixed_protections = false;
+    bool capped = false;
+};
+static HostSpanSummary SampleHostMappedSpan(uint64_t addr, uint64_t size) {
+    HostSpanSummary result {};
+    if (addr == 0 || size == 0 || size > UINT64_MAX - addr) return result;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+    constexpr uint32_t MaxRegions = 64;
+    const uint64_t end = addr + size;
+    uint64_t cursor = addr;
+    int prior_mode = -1;
+    while (cursor < end) {
+        MEMORY_BASIC_INFORMATION info {};
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &info, sizeof(info)) !=
+                sizeof(info) ||
+            info.State != MEM_COMMIT) return result;
+        const auto base = reinterpret_cast<uint64_t>(info.BaseAddress);
+        const auto extent = static_cast<uint64_t>(info.RegionSize);
+        if (base > cursor || extent == 0 || extent > UINT64_MAX - base ||
+            base + extent <= cursor) return result;
+        const int mode = static_cast<int>(HostProtectionBits(
+            static_cast<uint32_t>(info.Protect)));
+        if (mode == 8) return result; // guard/unknown host protection
+        if (result.regions == MaxRegions) {
+            result.capped = true;
+            return result;
+        }
+        ++result.regions;
+        if (prior_mode >= 0 && prior_mode != mode)
+            result.mixed_protections = true;
+        prior_mode = mode;
+        cursor = std::min(end, base + extent);
+    }
+    result.full = true;
+#else
+    // Win32 host-view verification is unavailable on this platform.
+    (void)addr;
+    (void)size;
+#endif
+    return result;
+}
 static bool TakeMemoryReceiptSlot() {
 	static std::atomic_uint32_t count {0};
 	const auto number = count.fetch_add(1, std::memory_order_relaxed);
@@ -1746,6 +1792,22 @@ static void EmitMemorySegment(const Program* p, Elf64_Half index,
 	            host ? 1u : 0u, skipped ? 1u : 0u);
 	std::fflush(stdout);
 }
+static void EmitMemorySpan(const Program* p) {
+    if (!MemoryMapReceiptEnabled() || p == nullptr || p->unique_id <= 0) return;
+    if (!TakeMemoryReceiptSlot()) return;
+    const auto guest = Libs::LibKernel::Memory::InspectProgramMappingSpan(
+        p->base_vaddr, p->mapped_size);
+    const auto host = SampleHostMappedSpan(p->base_vaddr, p->mapped_size);
+    std::printf("XXII_RUNTIME_MEMORY_V1 op=SPAN id=%d guest=%u host=%u"
+                " guest_regions=%u host_regions=%u guest_mixed=%u"
+                " host_mixed=%u capped=%u\n",
+                p->unique_id, guest.full ? 1u : 0u, host.full ? 1u : 0u,
+                guest.regions, host.regions,
+                guest.mixed_protections ? 1u : 0u,
+                host.mixed_protections ? 1u : 0u,
+                (guest.capped || host.capped) ? 1u : 0u);
+    std::fflush(stdout);
+}
 static void EmitMemoryLoadDone(const Program* p, uint32_t segmentCount) {
     if (!MemoryMapReceiptEnabled() || p == nullptr || p->unique_id <= 0) return;
     if (!TakeMemoryReceiptSlot()) return;
@@ -1762,6 +1824,48 @@ static void EmitMemoryFreed(int32_t program_id) {
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 // Uses exactly the same endpoint samplers as the loader receipts, on an
 // actual owned guest/host allocation rather than simulated stdout strings.
+bool TestRuntimeMemoryFullSpanSummary() {
+    using Libs::LibKernel::Memory::InspectProgramMappingSpan;
+    using Libs::LibKernel::Memory::AllocateProgramMemory;
+    using Libs::LibKernel::Memory::AllocateRuntimeMemory;
+    using Libs::LibKernel::Memory::FreeGuestMemory;
+    using Common::VirtualMemory::Mode;
+    constexpr uint64_t page = 0x4000;
+    const auto base = AllocateProgramMemory(0, page * 3, Mode::ReadWrite,
+                                            "span_inspector_fixture");
+    if (base == 0) return false;
+    const auto initial = InspectProgramMappingSpan(base, page * 3);
+    const auto host_initial = SampleHostMappedSpan(base, page * 3);
+    Libs::LibKernel::Memory::SetProgramMemoryProtection(
+        base + page, page, Mode::Read);
+    const auto split = InspectProgramMappingSpan(base, page * 3);
+    const auto host_split = SampleHostMappedSpan(base, page * 3);
+    const auto overflow = InspectProgramMappingSpan(UINT64_MAX - page, page * 2);
+    const bool freed = FreeGuestMemory(base, page * 3);
+    const auto after_free = InspectProgramMappingSpan(base, page * 3);
+    const auto runtime = AllocateRuntimeMemory(0, page, Mode::ReadWrite,
+                                               "noncode_span_fixture");
+    const bool runtime_rejected = runtime != 0 &&
+                                  !InspectProgramMappingSpan(runtime, page).full;
+    const bool runtime_freed = runtime != 0 && FreeGuestMemory(runtime, page);
+
+    const auto fragmented = AllocateProgramMemory(0, page * 70, Mode::ReadWrite,
+                                                  "span_budget_fixture");
+    if (fragmented == 0) return false;
+    for (uint64_t i=1; i<70; i+=2)
+        Libs::LibKernel::Memory::SetProgramMemoryProtection(
+            fragmented + i * page, page, Mode::Read);
+    const auto capped = InspectProgramMappingSpan(fragmented, page * 70);
+    const bool fragmented_freed = FreeGuestMemory(fragmented, page * 70);
+    return initial.full && initial.regions == 1 && !initial.mixed_protections &&
+           host_initial.full && split.full && split.regions == 3 &&
+           split.mixed_protections && host_split.full &&
+           !overflow.full && !overflow.capped &&
+           freed && !after_free.full && after_free.regions == 0 &&
+           runtime_rejected && runtime_freed &&
+           capped.capped && !capped.full && capped.regions == 64 &&
+           fragmented_freed;
+}
 bool TestRuntimeMemoryMapEndpointSampling() {
 	constexpr uint64_t page = 0x4000;
 	const auto base = Libs::LibKernel::Memory::AllocateProgramMemory(
@@ -2023,6 +2127,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 	}
 #if KYTY_DIAGNOSTIC_RUNTIME
 	// This marker follows all segment loads and TLS setup, not guest execution.
+	EmitMemorySpan(program);
 	EmitMemoryLoadDone(program, emittedSegmentCount);
 #endif
 

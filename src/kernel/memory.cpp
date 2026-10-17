@@ -384,6 +384,40 @@ public:
 		return true;
 	}
 
+#if KYTY_DIAGNOSTIC_RUNTIME
+    ProgramMappingSpanSummary SummarizeProgramSpan(uint64_t start, uint64_t size) {
+        constexpr uint32_t MaxRegions = 64;
+        ProgramMappingSpanSummary result {};
+        Common::LockGuard lock(m_mutex);
+        if (start == 0 || size == 0 || size > UINT64_MAX - start) return result;
+
+        const uint64_t end = start + size;
+        uint64_t cursor = start;
+        int previous_mode = -1;
+        for (const auto& range : m_ranges) {
+            const uint64_t range_end = End(range.start, range.size);
+            if (range_end <= cursor) continue;
+            if (range.start > cursor || range.type != VirtualRangeType::Code)
+                return result; // Gap or a non-Code owner, never a complete span.
+            if (result.regions == MaxRegions) {
+                result.capped = true;
+                return result;
+            }
+            ++result.regions;
+            const int mode = range.protection & (PROT_CPU_READ | PROT_CPU_WRITE | PROT_CPU_EXEC);
+            if (previous_mode >= 0 && mode != previous_mode)
+                result.mixed_protections = true;
+            previous_mode = mode;
+            cursor = std::min(end, range_end);
+            if (cursor == end) {
+                result.full = true;
+                return result;
+            }
+        }
+        return result;
+    }
+#endif
+
 	bool QuerySpan(uint64_t start, uint64_t size, std::vector<Range>* out) {
 		EXIT_IF(out == nullptr);
 
@@ -3702,6 +3736,14 @@ int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryIn
 
 	return OK;
 }
+
+#if KYTY_DIAGNOSTIC_RUNTIME
+ProgramMappingSpanSummary InspectProgramMappingSpan(uint64_t vaddr, uint64_t size) {
+    std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
+    if (g_virtual_ranges == nullptr) return {};
+    return g_virtual_ranges->SummarizeProgramSpan(vaddr, size);
+}
+#endif
 
 int KYTY_SYSV_ABI KernelIsStack(void* addr, void** start, void** end) {
 	PRINT_NAME();
