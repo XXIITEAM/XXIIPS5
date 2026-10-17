@@ -1746,6 +1746,13 @@ static void EmitMemorySegment(const Program* p, Elf64_Half index,
 	            host ? 1u : 0u, skipped ? 1u : 0u);
 	std::fflush(stdout);
 }
+static void EmitMemoryLoadDone(const Program* p, uint32_t segmentCount) {
+    if (!MemoryMapReceiptEnabled() || p == nullptr || p->unique_id <= 0) return;
+    if (!TakeMemoryReceiptSlot()) return;
+    std::printf("XXII_RUNTIME_MEMORY_V1 op=LOAD_DONE id=%d segments=%u\n",
+                p->unique_id, static_cast<unsigned>(segmentCount));
+    std::fflush(stdout);
+}
 static void EmitMemoryFreed(int32_t program_id) {
 	if (!MemoryMapReceiptEnabled() || program_id <= 0) return;
 	if (!TakeMemoryReceiptSlot()) return;
@@ -1881,6 +1888,9 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 	std::vector<std::pair<uint64_t, uint64_t>> executable_segments;
 	uint64_t                                   eh_frame_header_addr = 0;
 	uint64_t                                   eh_frame_header_size = 0;
+#if KYTY_DIAGNOSTIC_RUNTIME
+	uint32_t                                   emittedSegmentCount = 0;
+#endif
 
 	for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
 		if (phdr[i].p_memsz != 0 && (phdr[i].p_type == PT_LOAD || phdr[i].p_type == PT_OS_RELRO)) {
@@ -1916,6 +1926,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			}
 #if KYTY_DIAGNOSTIC_RUNTIME
 			EmitMemorySegment(program, i, segment_addr, segment_memory_size, mode, skip_protect);
+			++emittedSegmentCount;
 #endif
 		}
 
@@ -2010,6 +2021,10 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 	if (!is_shared) {
 		SetupTlsHandler(program);
 	}
+#if KYTY_DIAGNOSTIC_RUNTIME
+	// This marker follows all segment loads and TLS setup, not guest execution.
+	EmitMemoryLoadDone(program, emittedSegmentCount);
+#endif
 
 	LOGF("entry = 0x%016" PRIx64 "\n", program->elf->GetEntry() + program->base_vaddr);
 }
