@@ -393,6 +393,7 @@ add_library(kyty_emulator_objects OBJECT ${kyty_emulator_src})
 if(PSVXXII_EDITION STREQUAL "DEVELOPER")
     set_source_files_properties(
         "${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/shaders.cpp"
+        "${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp"
         PROPERTIES COMPILE_DEFINITIONS XXII_DEV_GPU_LAYOUT_TRACE=1)
 endif()
 target_include_directories(kyty_emulator_objects PRIVATE ${inc_headers})

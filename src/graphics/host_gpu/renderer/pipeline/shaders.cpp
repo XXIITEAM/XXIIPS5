@@ -32,13 +32,20 @@
 
 namespace Libs::Graphics {
 
-// P0-SPV4: from the exact VkDescriptorSetLayoutBinding vector used to
-// construct the native pipeline. A finite, opt-in numeric stderr receipt.
+// SPV4/SPV5: from the same Vulkan layout parameters and shader module
+// records actually passed to CreatePipelineInternal. Read-only, Developer
+// opt-in, finite CPU-side receipt; no driver capture or Guest memory dump.
 #if defined(XXII_DEV_GPU_LAYOUT_TRACE)
+struct TracedShaderModule {
+    uint32_t stage = 0;
+    const ShaderProgram* program = nullptr;
+};
+
 static void TraceNativePipelineLayout(
     const char* pipeline_class,
     std::span<const vk::DescriptorSetLayoutBinding> bindings,
-    const vk::PushConstantRange& push, vk::Result creation_result) {
+    const vk::PushConstantRange& push, vk::Result creation_result,
+    std::span<const TracedShaderModule> modules, bool complete) {
     static const bool enabled=[] {
         const char* probe=std::getenv("XXII_COMPAT_PROBE");
         const char* trace=std::getenv("XXII_GPU_LAYOUT_TRACE");
@@ -69,15 +76,49 @@ static void TraceNativePipelineLayout(
             tuples+=std::to_string(static_cast<uint32_t>(binding.stageFlags));
         }
     }
-    // No shader code, game paths, names, handles, addresses or pointers.
+
+    // Fingerprints are from the FINAL SPIR-V passed to vkCreateShaderModule,
+    // not the guest shader_hash or the pre-optimization shader. IDs are only
+    // meaningful inside the current guest process; no handles are logged.
+    const bool moduleCap=modules.empty() || modules.size()>4;
+    bool fullIdentity=complete && !moduleCap;
+    std::string moduleFields;
+    for(const auto& record:modules) {
+        if(!record.program || record.program->id==0 ||
+           record.program->evidence_words<5 ||
+           record.program->evidence_words>65536u ||
+           (record.program->evidence_low==0 && record.program->evidence_high==0)) {
+            fullIdentity=false;
+            break;
+        }
+        char digest[33]{};
+        std::snprintf(digest,sizeof(digest),"%016" PRIx64 "%016" PRIx64,
+                      record.program->evidence_high,record.program->evidence_low);
+        if(!moduleFields.empty())moduleFields.push_back(';');
+        moduleFields+=std::to_string(record.stage);
+        moduleFields.push_back(':');
+        moduleFields+=std::to_string(record.program->id);
+        moduleFields.push_back(':');
+        moduleFields+=std::to_string(record.program->evidence_words);
+        moduleFields.push_back(':');
+        moduleFields+=digest;
+    }
+    if(moduleCap || moduleFields.size()>320)fullIdentity=false;
+    // All-or-nothing: partial stage identities are not comparable. A
+    // special RectList shader or an absent digest blocks a full pairing.
+    if(!fullIdentity)moduleFields="CAP";
+    // No shader code, guest path, name, address, Vulkan handle or pointer.
+    // XXH3_128 is a fast non-cryptographic fingerprint, NOT an attestation.
     std::fprintf(stderr,
-       "XXII_GPU_LAYOUT_V1 seq=%u class=%s created=%d bindings=%u total=%u "
-       "push_offset=%u push_size=%u push_stages=%u tuples=%s\n",
+       "XXII_GPU_LAYOUT_V2 seq=%u class=%s created=%d bindings=%u total=%u "
+       "push_offset=%u push_size=%u push_stages=%u tuples=%s "
+       "modules=%u complete=%u ids=%s\n",
        seq,pipeline_class,creation_result==vk::Result::eSuccess?1:0,
        static_cast<unsigned>(std::min(bindings.size(),size_t(999))),
        static_cast<unsigned>(std::min(total,uint64_t(65535))),
        push.offset,push.size,static_cast<uint32_t>(push.stageFlags),
-       tuples.c_str());
+       tuples.c_str(),static_cast<unsigned>(std::min(modules.size(),size_t(4))),
+       fullIdentity?1u:0u,moduleFields.c_str());
     std::fflush(stderr);
 }
 #endif
@@ -526,7 +567,22 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline_layout));
 	}
 #if defined(XXII_DEV_GPU_LAYOUT_TRACE)
-	TraceNativePipelineLayout("graphics",descriptor_bindings,push_constants,result);
+	std::array<TracedShaderModule,4> tracedModules{};
+	size_t tracedCount=0;
+	for(size_t i=0;i<vertex_info.size() && tracedCount<tracedModules.size();++i) {
+		tracedModules[tracedCount++] = {
+		    static_cast<uint32_t>(NativeShaderStage(vertex_info[i].logical_stage)),
+		    &programs.vertex[i]};
+	}
+	if(ps_active && tracedCount<tracedModules.size()) {
+		tracedModules[tracedCount++] = {
+		    static_cast<uint32_t>(vk::ShaderStageFlagBits::eFragment),&programs.pixel};
+	}
+	// RectList injects two additional internal shader modules, for which
+	// the guest shader ProgramCache holds no final-SPIR-V identity.
+	TraceNativePipelineLayout("graphics",descriptor_bindings,push_constants,result,
+	                          std::span(tracedModules.data(),tracedCount),
+	                          !rect_list && tracedCount==shader_stage_count);
 #endif
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
@@ -635,13 +691,13 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
-                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache) {
-	EXIT_IF(compute_module == nullptr);
+                            const ShaderProgram& compute_program, vk::PipelineCache driver_cache) {
+	EXIT_IF(!compute_program);
 
 	vk::PipelineShaderStageCreateInfo                     comp_shader_stage_info {};
 	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo comp_subgroup_size {};
 	comp_shader_stage_info.stage  = vk::ShaderStageFlagBits::eCompute;
-	comp_shader_stage_info.module = compute_module;
+	comp_shader_stage_info.module = compute_program.module;
 	comp_shader_stage_info.pName  = "main";
 	EXIT_IF(!input_info.stage);
 	const auto wave_size = input_info.stage.program->wave_size;
@@ -673,7 +729,10 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	LOGF("PipelineTrace: vkCreatePipelineLayout CS done result=%s layout=%p\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline_layout));
 #if defined(XXII_DEV_GPU_LAYOUT_TRACE)
-	TraceNativePipelineLayout("compute",descriptor_bindings,push_constants,result);
+	const TracedShaderModule tracedModule{
+	    static_cast<uint32_t>(vk::ShaderStageFlagBits::eCompute),&compute_program};
+	TraceNativePipelineLayout("compute",descriptor_bindings,push_constants,result,
+	                          std::span(&tracedModule,1),true);
 #endif
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 

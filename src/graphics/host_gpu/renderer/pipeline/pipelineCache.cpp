@@ -329,6 +329,26 @@ struct PipelineCache::ProgramCache {
 			     options.shader_hash);
 		}
 		DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
+		// SPV5: identity of bytes passed to vkCreateShaderModule AFTER
+		// all optional optimization passes. xxHash is already used by Kyty.
+		// This is a diagnostic fingerprint, not a cryptographic attestation.
+		uint64_t evidence_low = 0, evidence_high = 0;
+		uint32_t evidence_words = 0;
+#if defined(XXII_DEV_GPU_LAYOUT_TRACE)
+		static const bool identify = [] {
+			const char* probe = std::getenv("XXII_COMPAT_PROBE");
+			const char* trace = std::getenv("XXII_GPU_LAYOUT_TRACE");
+			return probe && probe[0] == '1' && probe[1] == '\0' &&
+			       trace && trace[0] == '1' && trace[1] == '\0';
+		}();
+		if (identify && !result.spirv.empty() && result.spirv.size() <= 65536u) {
+			const auto digest = XXH3_128bits(result.spirv.data(),
+			                               result.spirv.size() * sizeof(uint32_t));
+			evidence_low = digest.low64;
+			evidence_high = digest.high64;
+			evidence_words = static_cast<uint32_t>(result.spirv.size());
+		}
+#endif
 
 		const auto module = CompileSPV(result.spirv, device);
 		EXIT_IF(module == nullptr);
@@ -365,7 +385,10 @@ struct PipelineCache::ProgramCache {
 		    .function_code  = {function_code.begin(), function_code.end()},
 		    .specialization = std::move(specialization),
 		    .program        = std::move(result.program).TakeCompiledInfo(),
-		    .handle         = {.id = ++next_shader_id, .module = module},
+		    .handle         = {.id = ++next_shader_id, .module = module,
+		                       .evidence_low = evidence_low,
+		                       .evidence_high = evidence_high,
+		                       .evidence_words = evidence_words},
 		};
 	}
 
@@ -1025,7 +1048,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	}
 
 	auto cached = std::make_unique<Pipeline>();
-	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache);
+	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program, m_driver_cache);
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
