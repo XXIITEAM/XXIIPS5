@@ -964,8 +964,10 @@ endif()
 
 # Embedding projects (for example the PSVXXII frontend) can build their own
 # directories inside this scope, once every Kyty target, variable and compiler
-# setting is defined. Each entry is an absolute source directory.
+# setting is defined. Each entry is an absolute source directory; its binary
+# directory is <top-level build>/<directory name>, so the embedder keeps a
+# stable build-tree layout independent of where this project is added.
 foreach(kyty_external_dir IN LISTS KYTY_EXTERNAL_SUBDIRECTORIES)
 	get_filename_component(kyty_external_name "${kyty_external_dir}" NAME)
-	add_subdirectory("${kyty_external_dir}" "${CMAKE_CURRENT_BINARY_DIR}/external/${kyty_external_name}")
+	add_subdirectory("${kyty_external_dir}" "${CMAKE_BINARY_DIR}/${kyty_external_name}")
 endforeach()
