@@ -1024,6 +1024,15 @@ void WindowContext::CreateVulkan() {
 			EXIT("Could not create debug messenger");
 		}
 	}
+	// SPV10: unlike the preliminary layer-enumeration marker, this is
+	// emitted only after the VkInstance and debug messenger were created.
+	if (const char* probe = std::getenv("XXII_COMPAT_PROBE"); probe && strcmp(probe, "1") == 0) {
+		std::fprintf(stderr, "XXII_VK_VALIDATION_INSTANCE_V1 requested=%u enabled=%u messenger=%u\n",
+		             Config::VulkanValidationEnabled() ? 1u : 0u,
+		             r.enable_validation_layers ? 1u : 0u,
+		             graphic_ctx.debug_messenger != nullptr ? 1u : 0u);
+		std::fflush(stderr);
+	}
 
 	vk::SurfaceKHR::CType native_surface = VK_NULL_HANDLE;
 	if (!SDL_Vulkan_CreateSurface(window, static_cast<vk::Instance::CType>(graphic_ctx.instance),
@@ -1161,6 +1170,28 @@ void WindowContext::CreateVulkan() {
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(graphic_ctx.device);
 	graphic_ctx.device.getQueue(graphic_ctx.queue_family, 0, &graphic_ctx.queue);
 	EXIT_IF(graphic_ctx.queue == nullptr);
+
+	// SPV10: selected physical device properties are queried AFTER
+	// device/queue creation. PCI model IDs are not UUIDs or serials.
+	// These three read-only format queries do not create GPU resources.
+	if (const char* probe = std::getenv("XXII_COMPAT_PROBE"); probe && strcmp(probe, "1") == 0) {
+		const auto depth_compare = [&](vk::Format format) {
+			vk::FormatProperties3 fmt3 {};
+			vk::FormatProperties2 fmt2 {};
+			fmt2.pNext = &fmt3;
+			graphic_ctx.physical_device.getFormatProperties2(format, &fmt2);
+			return (static_cast<VkFormatFeatureFlags2>(fmt3.optimalTilingFeatures) &
+			        VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT) != 0;
+		};
+		std::fprintf(stderr,
+		             "XXII_VK_SELECTED_DEPTH_V1 vendor=%u device=%u api=%u d16=%u d32=%u r32=%u\n",
+		             device_properties.vendorID, device_properties.deviceID,
+		             device_properties.apiVersion,
+		             depth_compare(vk::Format::eD16Unorm) ? 1u : 0u,
+		             depth_compare(vk::Format::eD32Sfloat) ? 1u : 0u,
+		             depth_compare(vk::Format::eR32Sfloat) ? 1u : 0u);
+		std::fflush(stderr);
+	}
 
 	if (!graphic_ctx.CreateAllocator()) {
 		EXIT("Could not create Vulkan memory allocator");
