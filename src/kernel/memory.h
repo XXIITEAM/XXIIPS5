@@ -203,6 +203,10 @@ struct ProgramMappingSpanSummary {
 ProgramMappingSpanSummary InspectProgramMappingSpan(uint64_t vaddr, uint64_t size);
 #endif
 
+#if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS) && KYTY_DIAGNOSTIC_RUNTIME
+bool TestRuntimeAllocationLifetimeEvidence();
+#endif
+
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 void     TestBeforeNextBackingMap(callback_func_t callback);
 void     TestSetBackingReadCallback(callback_func_t callback);

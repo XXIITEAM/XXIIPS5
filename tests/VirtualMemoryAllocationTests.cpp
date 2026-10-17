@@ -3203,6 +3203,13 @@ void TestProgramMemoryAllocationAndProtection() {
 }
 
 #if KYTY_DIAGNOSTIC_RUNTIME
+void TestRuntimeAllocationLifetimeEvidence() {
+    const char* test = "RuntimeAllocationLifetimeEvidence";
+    Check(test, Libs::LibKernel::Memory::TestRuntimeAllocationLifetimeEvidence(),
+          "owner allocation generations, same address reuse, partial stop, and cap failed");
+    std::printf("[host]    %-48s ok\n", test);
+}
+
 void TestRuntimeMemoryConcurrentSemanticSpan() {
     const char* test = "RuntimeMemoryConcurrentSemanticSpan";
     Check(test, Loader::TestRuntimeMemoryConcurrentSemanticSpan(),
@@ -4557,6 +4564,7 @@ int main(int argc, char** argv) {
 	RunTest(TestProgramMemoryAllocationAndProtection);
 	RunTest(TestModuleRelocationUsesWritableHostMapping);
 #if KYTY_DIAGNOSTIC_RUNTIME
+    RunTest(TestRuntimeAllocationLifetimeEvidence);
 	RunTest(TestRuntimeMemoryMapEndpointSampling);
 	RunTest(TestRuntimeMemoryFullSpanSummary);
 	RunTest(TestRuntimeMemoryConcurrentSemanticSpan);

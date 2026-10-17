@@ -5,6 +5,9 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/virtualMemory.h"
+#if KYTY_DIAGNOSTIC_RUNTIME
+#include "common/diagnostics/runtimeAllocationLedger.h"
+#endif
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "libs/errno.h"
@@ -15,6 +18,7 @@
 #include <atomic>
 #include <bit>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <magic_enum.hpp>
@@ -867,6 +871,58 @@ static std::atomic<uint64_t>              g_memory_pool_committed = 0;
 static void                               MemoryPoolSubtractCommitted(uint64_t len);
 // Keep host mappings, physical blocks, placeholders, and virtual ranges in step.
 static std::recursive_mutex g_memory_operation_mutex;
+
+#if KYTY_DIAGNOSTIC_RUNTIME
+namespace {
+using AllocationLedger = Common::Diagnostics::RuntimeAllocationLedger;
+static AllocationLedger g_allocation_ledger;
+#if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
+static bool g_test_allocation_trace_enabled = false;
+#endif
+static bool AllocationTraceEnabled() {
+    // The user opted into a Developer capture before process startup.
+    // Do not read environment variables repeatedly on the allocator path.
+    static const bool configured=[] {
+        const char* value=std::getenv("XXII_COMPAT_ALLOC_LIFETIMES");
+        return value != nullptr && value[0]=='1' && value[1]=='\0';
+    }();
+#if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
+    return configured || g_test_allocation_trace_enabled;
+#else
+    return configured;
+#endif
+}
+static void ReportAllocationLifeEvent(const AllocationLedger::Event& event) {
+    using A = AllocationLedger::Action;
+    if(event.action==A::None)return;
+    if(event.action==A::Limit) {
+        std::printf("XXII_RUNTIME_ALLOC_V1 op=LIMIT\n");
+    } else if(event.action==A::Allocate) {
+        const char type=event.kind==AllocationLedger::Kind::Code ? 'C' :
+                        event.kind==AllocationLedger::Kind::Runtime ? 'R' : 'S';
+        std::printf("XXII_RUNTIME_ALLOC_V1 op=ALLOC slot=%u id=%u gen=%u"
+                    " kind=%c pages=%u reused=%u\n",
+                    event.slot,event.id,event.generation,type,event.pages,
+                    event.reused?1u:0u);
+    } else {
+        std::printf("XXII_RUNTIME_ALLOC_V1 op=%s slot=%u id=%u gen=%u\n",
+                    event.action==A::Free ? "FREE" : "PARTIAL",
+                    event.slot,event.id,event.generation);
+    }
+    std::fflush(stdout);
+}
+static void TrackAllocationLife(uint64_t address, uint64_t bytes,
+                                AllocationLedger::Kind kind) {
+    if(AllocationTraceEnabled())
+        ReportAllocationLifeEvent(g_allocation_ledger.allocated(address,bytes,kind));
+}
+static void TrackReleaseLife(uint64_t address,uint64_t bytes) {
+    if(AllocationTraceEnabled())
+        ReportAllocationLifeEvent(g_allocation_ledger.released(address,bytes));
+}
+} // namespace
+#endif
+
 
 // The base address the PS5 kernel hands out for hint-less user mappings. Guest code can
 // assume mappings it did not place explicitly are at or above this (Sony's libc rejects a
@@ -2561,8 +2617,12 @@ int KYTY_SYSV_ABI KernelClearVirtualRangeName(const void* addr, uint64_t len) {
 }
 
 static bool FreeGuestMemoryOwner(uint64_t vaddr, uint64_t size) {
-	return g_guest_address_space->ReleaseCommitted(vaddr, size) &&
-	       g_virtual_ranges->Remove(vaddr, size);
+    const bool released = g_guest_address_space->ReleaseCommitted(vaddr, size) &&
+                          g_virtual_ranges->Remove(vaddr, size);
+#if KYTY_DIAGNOSTIC_RUNTIME
+    if(released) TrackReleaseLife(vaddr,size);
+#endif
+    return released;
 }
 
 static int UnmapMemoryRange(uint64_t vaddr, size_t len) {
@@ -3864,6 +3924,15 @@ static uint64_t AllocateGuestRuntimeMemory(uint64_t search_addr, uint64_t size,
 		return 0;
 	}
 	MapGpuRange(vaddr, mapped_size);
+#if KYTY_DIAGNOSTIC_RUNTIME
+    if(type==VirtualRangeType::Code || type==VirtualRangeType::Runtime ||
+       type==VirtualRangeType::Stack) {
+        const auto kind=type==VirtualRangeType::Code ? AllocationLedger::Kind::Code :
+                        type==VirtualRangeType::Runtime ? AllocationLedger::Kind::Runtime :
+                                                          AllocationLedger::Kind::Stack;
+        TrackAllocationLife(vaddr,mapped_size,kind);
+    }
+#endif
 	return vaddr;
 }
 
@@ -3944,6 +4013,92 @@ bool FreeGuestMemory(uint64_t vaddr, uint64_t size) {
 	UnmapGpuRange(vaddr, mapped_size);
 	return FreeGuestMemoryOwner(vaddr, mapped_size);
 }
+
+#if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS) && KYTY_DIAGNOSTIC_RUNTIME
+bool TestRuntimeAllocationLifetimeEvidence() {
+    constexpr uint64_t page = 0x4000u;
+    // No gameplay, files, addresses or buffers are exported by these checks.
+    // Hold the same lock as normal memory owner mutations.
+    g_allocation_ledger.reset();
+    g_test_allocation_trace_enabled = true;
+
+    // Pure state-machine case checks also exercise variable-size reuse,
+    // stale FREE, partial invalidation and the bounded overflow policy.
+    AllocationLedger pure;
+    const auto a=pure.allocated(0x100000,page,AllocationLedger::Kind::Code);
+    const auto f=pure.released(0x100000,page);
+    const auto b=pure.allocated(0x100000,page*2,AllocationLedger::Kind::Runtime);
+    const auto stale=pure.released(0x100000,page);
+    const bool identity = a.action==AllocationLedger::Action::Allocate &&
+                          a.generation==1 && !a.reused &&
+                          f.action==AllocationLedger::Action::Free &&
+                          b.action==AllocationLedger::Action::Allocate &&
+                          b.generation==2 && b.reused && b.slot==a.slot &&
+                          b.id!=a.id &&
+                          stale.action==AllocationLedger::Action::Partial &&
+                          pure.summary().partial_or_unknown;
+    AllocationLedger capacity;
+    for(uint64_t i=0;i<AllocationLedger::MaxSlots;i++)
+        (void)capacity.allocated(0x200000+i*page*2,page,AllocationLedger::Kind::Runtime);
+    const auto limited=capacity.allocated(0x4000000,page,AllocationLedger::Kind::Code);
+    const bool bounded=limited.action==AllocationLedger::Action::Limit &&
+                       capacity.summary().capped &&
+                       capacity.summary().allocations==AllocationLedger::MaxSlots &&
+                       capacity.allocated(0x5000000,page,AllocationLedger::Kind::Code)
+                           .action==AllocationLedger::Action::None;
+
+    const auto original=AllocateProgramMemory(0,page*2,VirtualMemory::Mode::ReadWrite,
+                                               "allocation_lifecycle_fixture");
+    if(!original) {
+        g_test_allocation_trace_enabled=false;
+        g_allocation_ledger.reset();
+        return false;
+    }
+    const auto afterAlloc=g_allocation_ledger.summary();
+    const auto rejected=AllocateRuntimeMemory(original,page,
+                                             VirtualMemory::Mode::ReadWrite,
+                                             "allocation_collision_fixture",true);
+    const auto afterRejected=g_allocation_ledger.summary();
+    const bool freed=FreeGuestMemory(original,page*2);
+    const auto afterFree=g_allocation_ledger.summary();
+    // Fixed allocation forces the same address; a different size and
+    // semantic owner still represent a fresh generation, not the old one.
+    const auto replacement=AllocateRuntimeMemory(original,page,
+                                                VirtualMemory::Mode::ReadWrite,
+                                                "allocation_reused_fixture",true);
+    const auto afterReuse=g_allocation_ledger.summary();
+    const bool freedReplacement=replacement!=0 &&
+                                FreeGuestMemory(replacement,page);
+    const auto afterSecondFree=g_allocation_ledger.summary();
+    const bool native=afterAlloc.allocations==1 && afterAlloc.active==1 &&
+                      rejected==0 &&
+                      afterRejected.allocations==1 &&
+                      freed && afterFree.releases==1 && afterFree.active==0 &&
+                      replacement==original && afterReuse.allocations==2 &&
+                      afterReuse.reuses==1 && afterReuse.highest_generation==2 &&
+                      afterReuse.active==1 &&
+                      freedReplacement && afterSecondFree.releases==2 &&
+                      afterSecondFree.active==0 && !afterSecondFree.capped &&
+                      !afterSecondFree.partial_or_unknown;
+
+    // A partially released private owner must be marked ambiguous:
+    // neither the remaining reservation nor its later reuse is certified.
+    g_allocation_ledger.reset();
+    const auto partialBase=AllocateRuntimeMemory(
+        0,page*2,VirtualMemory::Mode::ReadWrite,"allocation_partial_fixture");
+    const bool partialFirst=partialBase!=0 && FreeGuestMemory(partialBase,page);
+    const auto partialState=g_allocation_ledger.summary();
+    const bool partialLast=partialBase!=0 &&
+                           FreeGuestMemory(partialBase+page,page);
+    const bool partialSafe=partialFirst && partialLast &&
+                           partialState.partial_or_unknown &&
+                           partialState.releases==0;
+
+    g_test_allocation_trace_enabled=false;
+    g_allocation_ledger.reset();
+    return identity && bounded && native && partialSafe;
+}
+#endif
 
 // The ABI entry points and batch operations hold g_memory_operation_mutex.
 static int ProtectMemory(const void* addr, size_t len, int prot) {
