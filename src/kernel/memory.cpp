@@ -899,7 +899,9 @@ static void ReportAllocationLifeEvent(const AllocationLedger::Event& event) {
         std::printf("XXII_RUNTIME_ALLOC_V1 op=LIMIT\n");
     } else if(event.action==A::Allocate) {
         const char type=event.kind==AllocationLedger::Kind::Code ? 'C' :
-                        event.kind==AllocationLedger::Kind::Runtime ? 'R' : 'S';
+                        event.kind==AllocationLedger::Kind::Runtime ? 'R' :
+                        event.kind==AllocationLedger::Kind::Stack ? 'S' :
+                        event.kind==AllocationLedger::Kind::Flexible ? 'F' : 'D';
         std::printf("XXII_RUNTIME_ALLOC_V1 op=ALLOC slot=%u id=%u gen=%u"
                     " kind=%c pages=%u reused=%u\n",
                     event.slot,event.id,event.generation,type,event.pages,
@@ -2476,7 +2478,10 @@ static int MapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags
 	if (g_alloc_callback != nullptr) {
 		g_alloc_callback(out_addr, len);
 	}
-
+#if KYTY_DIAGNOSTIC_RUNTIME
+    // A Flexible mapping is a guest virtual owner, not a physical allocation.
+    TrackAllocationLife(out_addr,len,AllocationLedger::Kind::Flexible);
+#endif
 	return OK;
 }
 
@@ -2691,6 +2696,14 @@ static int UnmapMemoryRange(uint64_t vaddr, size_t len) {
 	}
 
 	g_virtual_ranges->Remove(vaddr, len);
+#if KYTY_DIAGNOSTIC_RUNTIME
+    // Code/Runtime are already emitted by FreeGuestMemoryOwner.
+    // Stack, Flexible and Direct map/unmap lifetimes use this path.
+    if(range.type==VirtualRangeType::Stack ||
+       range.type==VirtualRangeType::Flexible ||
+       range.type==VirtualRangeType::Direct)
+        TrackReleaseLife(vaddr,len);
+#endif
 
 	if (g_free_callback != nullptr && IsCommittedRangeType(range.type)) {
 		g_free_callback(vaddr, len);
@@ -3028,7 +3041,12 @@ static int ReleaseDirectMemoryInternal(int64_t start, size_t len) {
 		EXIT_IF(!g_physical_memory->Release(block.start_addr, block.size, &unused_vaddr,
 		                                    &unused_size, &unused_gpu));
 	}
-
+#if KYTY_DIAGNOSTIC_RUNTIME
+    // Releasing physical memory can withdraw live VA aliases without
+    // KernelMunmap. Report *alias views* only after all native commits.
+    for(const auto& alias: mapped_aliases)
+        TrackReleaseLife(alias.map_vaddr,alias.map_size);
+#endif
 	if (g_free_callback != nullptr) {
 		for (const auto& alias: mapped_aliases) {
 			g_free_callback(alias.map_vaddr, alias.map_size);
@@ -3303,7 +3321,11 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 	if (g_alloc_callback != nullptr) {
 		g_alloc_callback(out_addr, len);
 	}
-
+#if KYTY_DIAGNOSTIC_RUNTIME
+    // Direct mappings are virtual views; several views may share backing.
+    // Track each VA independently, never the backing's physical identity.
+    TrackAllocationLife(out_addr,len,AllocationLedger::Kind::Direct);
+#endif
 	LOGF_COLOR(Log::Color::Green, "\t [Ok]\n");
 
 	return OK;
@@ -4015,6 +4037,83 @@ bool FreeGuestMemory(uint64_t vaddr, uint64_t size) {
 }
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS) && KYTY_DIAGNOSTIC_RUNTIME
+bool TestRuntimeMappedMemoryLifetimeEvidence() {
+    constexpr uint64_t page=0x4000;
+    constexpr int cpuRw=0x02;
+    constexpr int mtypeC=11;
+
+    g_test_allocation_trace_enabled=true;
+    g_allocation_ledger.reset();
+
+    const auto stack=AllocateGuestStackMemory(
+        0,page,VirtualMemory::Mode::ReadWrite,"b3_stack_fixture");
+    const bool stackFreed=stack!=0 && KernelMunmap(stack,page)==OK;
+
+    void* flexible=nullptr;
+    const bool flexMapped=KernelMapNamedFlexibleMemory(
+        &flexible,page*2,cpuRw,0,"b3_flex_fixture")==OK &&
+        flexible!=nullptr;
+    const bool flexFreed=flexMapped &&
+        KernelMunmap(reinterpret_cast<uint64_t>(flexible),page*2)==OK;
+
+    int64_t phys=0;
+    const bool physAllocated=KernelAllocateDirectMemory(
+        0,static_cast<int64_t>(KernelGetDirectMemorySize()),
+        page,page,mtypeC,&phys)==OK;
+    void* direct=nullptr;
+    const bool directMapped=physAllocated && KernelMapNamedDirectMemory(
+        &direct,page,cpuRw,0,phys,page,"b3_direct_fixture")==OK &&
+        direct!=nullptr;
+    const bool directFreed=directMapped &&
+        KernelMunmap(reinterpret_cast<uint64_t>(direct),page)==OK;
+    const bool physFreed=physAllocated &&
+        KernelCheckedReleaseDirectMemory(phys,page)==OK;
+
+    const auto first=g_allocation_ledger.summary();
+    const bool native=stackFreed && flexFreed && directFreed &&
+                      physFreed && first.allocations==3 &&
+                      first.releases==3 && first.active==0 &&
+                      !first.capped && !first.partial_or_unknown;
+
+    // A direct physical RELEASE can remove live virtual aliases without
+    // KernelMunmap. No physical allocation lifetime is inferred from it.
+    int64_t secondPhys=0;
+    const bool secondPhysAllocated=KernelAllocateDirectMemory(
+        0,static_cast<int64_t>(KernelGetDirectMemorySize()),
+        page,page,mtypeC,&secondPhys)==OK;
+    void* alias=nullptr;
+    const bool aliasMapped=secondPhysAllocated &&
+        KernelMapNamedDirectMemory(&alias,page,cpuRw,0,secondPhys,page,
+                                   "b3_direct_alias_fixture")==OK &&
+        alias!=nullptr;
+    const bool aliasFreed=secondPhysAllocated &&
+        KernelCheckedReleaseDirectMemory(secondPhys,page)==OK;
+    const auto afterAlias=g_allocation_ledger.summary();
+    const bool aliasValid=aliasMapped && aliasFreed &&
+                          afterAlias.allocations==4 && afterAlias.releases==4 &&
+                          afterAlias.active==0 && !afterAlias.capped;
+
+    // Partial FLEX munmap is intentionally inconclusive, and later
+    // operations do not synthesize a full release for that old owner.
+    g_allocation_ledger.reset();
+    void* fragmented=nullptr;
+    const bool fragmentMapped=KernelMapNamedFlexibleMemory(
+        &fragmented,page*2,cpuRw,0,"b3_partial_fixture")==OK &&
+        fragmented!=nullptr;
+    const auto partialAddr=reinterpret_cast<uint64_t>(fragmented);
+    const bool firstHalfFreed=fragmentMapped &&
+        KernelMunmap(partialAddr,page)==OK;
+    const auto halfway=g_allocation_ledger.summary();
+    const bool secondHalfFreed=firstHalfFreed &&
+        KernelMunmap(partialAddr+page,page)==OK;
+    const bool partialCorrect=fragmentMapped && firstHalfFreed &&
+        secondHalfFreed && halfway.partial_or_unknown &&
+        halfway.releases==0 && halfway.allocations==1;
+
+    g_test_allocation_trace_enabled=false;
+    g_allocation_ledger.reset();
+    return native && aliasValid && partialCorrect;
+}
 bool TestRuntimeAllocationLifetimeEvidence() {
     constexpr uint64_t page = 0x4000u;
     // No gameplay, files, addresses or buffers are exported by these checks.

@@ -3,6 +3,8 @@
 // All calls must hold the kernel's memory-operation mutex. Base addresses
 // are used as internal comparison keys ONLY; Event/Summary contain no
 // address, pointer, name, path, memory bytes, shader or game information.
+// Direct records are VIRTUAL ALIASES, not physical allocations. The ledger
+// does NOT establish physical lifetime, GPU ownership or backing provenance.
 // This is deliberately not a full PS5 or Win32 allocation tracker.
 #include <array>
 #include <cstdint>
@@ -14,7 +16,7 @@ public:
     static constexpr uint32_t MaxSlots = 64;
     static constexpr uint32_t MaxReceipts = 128;
 
-    enum class Kind : uint8_t { None, Code, Runtime, Stack };
+    enum class Kind : uint8_t { None, Code, Runtime, Stack, Flexible, Direct };
     enum class Action : uint8_t { None, Allocate, Free, Partial, Limit };
 
     struct Event {

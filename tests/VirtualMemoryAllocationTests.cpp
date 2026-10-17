@@ -3203,6 +3203,13 @@ void TestProgramMemoryAllocationAndProtection() {
 }
 
 #if KYTY_DIAGNOSTIC_RUNTIME
+void TestRuntimeMappedMemoryLifetimeEvidence() {
+    const char* test="RuntimeMappedMemoryLifetimeEvidence";
+    Check(test,Libs::LibKernel::Memory::TestRuntimeMappedMemoryLifetimeEvidence(),
+          "stack/flexible/direct mappings or alias release were not tracked safely");
+    std::printf("[host]    %-48s ok\n",test);
+}
+
 void TestRuntimeAllocationLifetimeEvidence() {
     const char* test = "RuntimeAllocationLifetimeEvidence";
     Check(test, Libs::LibKernel::Memory::TestRuntimeAllocationLifetimeEvidence(),
@@ -4565,6 +4572,7 @@ int main(int argc, char** argv) {
 	RunTest(TestModuleRelocationUsesWritableHostMapping);
 #if KYTY_DIAGNOSTIC_RUNTIME
     RunTest(TestRuntimeAllocationLifetimeEvidence);
+    RunTest(TestRuntimeMappedMemoryLifetimeEvidence);
 	RunTest(TestRuntimeMemoryMapEndpointSampling);
 	RunTest(TestRuntimeMemoryFullSpanSummary);
 	RunTest(TestRuntimeMemoryConcurrentSemanticSpan);
