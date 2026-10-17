@@ -17,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -4037,6 +4038,67 @@ bool FreeGuestMemory(uint64_t vaddr, uint64_t size) {
 }
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS) && KYTY_DIAGNOSTIC_RUNTIME
+bool TestRuntimeAllocationObserverOffOnFixture() {
+    // A tiny native microbenchmark. No game process, GPU or performance
+    // acceptance threshold: CI load and filesystem caching are uncontrolled.
+    constexpr int Pairs=3;
+    constexpr int PerArm=12;
+    constexpr uint64_t Page=0x4000;
+    std::array<uint64_t,Pairs> off {},on {};
+    bool correct=true;
+    for(int pair=0;pair<Pairs;++pair) {
+        // Counterbalance OFF/ON ordering to limit first-run bias.
+        for(int arm=0;arm<2;++arm) {
+            const bool enabled=(arm==0)==(pair%2==1);
+            g_allocation_ledger.reset();
+            g_test_allocation_trace_enabled=enabled;
+            const auto start=std::chrono::steady_clock::now();
+            for(int index=0;index<PerArm;++index) {
+                const auto addr=AllocateRuntimeMemory(
+                    0,Page,VirtualMemory::Mode::ReadWrite,"b3_bench_fixture");
+                if(addr==0) { correct=false; break; }
+                if(!FreeGuestMemory(addr,Page)) { correct=false; break; }
+            }
+            const auto stop=std::chrono::steady_clock::now();
+            const auto elapsed=std::chrono::duration_cast<std::chrono::nanoseconds>(
+                stop-start).count();
+            const auto summary=g_allocation_ledger.summary();
+            correct=correct && elapsed>0 && !summary.capped &&
+                    !summary.partial_or_unknown && summary.active==0 &&
+                    (enabled ? summary.allocations==PerArm &&
+                               summary.releases==PerArm &&
+                               summary.receipts==2*PerArm :
+                               summary.allocations==0 &&
+                               summary.releases==0 && summary.receipts==0);
+            auto& result=enabled?on[static_cast<size_t>(pair)]:
+                                  off[static_cast<size_t>(pair)];
+            result=elapsed>0 ? static_cast<uint64_t>(elapsed) : 0;
+        }
+    }
+    g_test_allocation_trace_enabled=false;
+    g_allocation_ledger.reset();
+    if(!correct)return false;
+    const uint64_t offMin=*std::min_element(off.begin(),off.end());
+    const uint64_t onMin=*std::min_element(on.begin(),on.end());
+    int64_t deltaMin=INT64_MAX,deltaMax=INT64_MIN;
+    for(int pair=0;pair<Pairs;++pair) {
+        const auto delta=static_cast<int64_t>(on[static_cast<size_t>(pair)])-
+                         static_cast<int64_t>(off[static_cast<size_t>(pair)]);
+        deltaMin=std::min(deltaMin,delta);
+        deltaMax=std::max(deltaMax,delta);
+    }
+    // Sanitized measurement only, never a gameplay speedup claim.
+    std::printf("PSVXXII_ALLOC_OFF_ON_V1 pairs=%d operations_per_arm=%d"
+                " off_min_ns=%llu on_min_ns=%llu"
+                " paired_delta_min_ns=%lld paired_delta_max_ns=%lld"
+                " scope=NATIVE_FIXTURE_NOT_GAME\n",
+                Pairs,PerArm,
+                static_cast<unsigned long long>(offMin),
+                static_cast<unsigned long long>(onMin),
+                static_cast<long long>(deltaMin),
+                static_cast<long long>(deltaMax));
+    return true;
+}
 bool TestRuntimeMappedMemoryLifetimeEvidence() {
     constexpr uint64_t page=0x4000;
     constexpr int cpuRw=0x02;

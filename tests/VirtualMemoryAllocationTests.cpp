@@ -3203,6 +3203,12 @@ void TestProgramMemoryAllocationAndProtection() {
 }
 
 #if KYTY_DIAGNOSTIC_RUNTIME
+void TestRuntimeAllocationObserverOffOnFixture() {
+    const char* test="RuntimeAllocationObserverOffOnFixture";
+    Check(test,Libs::LibKernel::Memory::TestRuntimeAllocationObserverOffOnFixture(),
+          "allocation lifecycle OFF/ON native workload did not retain coherent counts");
+    std::printf("[host]    %-48s ok\n",test);
+}
 void TestRuntimeMappedMemoryLifetimeEvidence() {
     const char* test="RuntimeMappedMemoryLifetimeEvidence";
     Check(test,Libs::LibKernel::Memory::TestRuntimeMappedMemoryLifetimeEvidence(),
@@ -4452,6 +4458,12 @@ void TestSmallFiberStacksAndMigration() {
 
 int main(int argc, char** argv) {
 	InitSubsystems();
+#if KYTY_DIAGNOSTIC_RUNTIME
+    if(argc==2 && std::strcmp(argv[1],"--allocation-observer-budget-only")==0) {
+        RunTest(TestRuntimeAllocationObserverOffOnFixture);
+        return g_failed_tests==0 ? 0 : 1;
+    }
+#endif
 	if (argc == 2 && std::strcmp(argv[1], "--backing-transfers-only") == 0) {
 		RunTest(TestConcurrentBackingReads);
 		RunTest(TestBackingReadExcludesWritesAndUnmap);
@@ -4573,6 +4585,7 @@ int main(int argc, char** argv) {
 #if KYTY_DIAGNOSTIC_RUNTIME
     RunTest(TestRuntimeAllocationLifetimeEvidence);
     RunTest(TestRuntimeMappedMemoryLifetimeEvidence);
+    RunTest(TestRuntimeAllocationObserverOffOnFixture);
 	RunTest(TestRuntimeMemoryMapEndpointSampling);
 	RunTest(TestRuntimeMemoryFullSpanSummary);
 	RunTest(TestRuntimeMemoryConcurrentSemanticSpan);

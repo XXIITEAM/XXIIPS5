@@ -206,6 +206,7 @@ ProgramMappingSpanSummary InspectProgramMappingSpan(uint64_t vaddr, uint64_t siz
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS) && KYTY_DIAGNOSTIC_RUNTIME
 bool TestRuntimeAllocationLifetimeEvidence();
 bool TestRuntimeMappedMemoryLifetimeEvidence();
+bool TestRuntimeAllocationObserverOffOnFixture();
 #endif
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
