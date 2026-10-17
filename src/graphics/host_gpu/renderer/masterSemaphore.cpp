@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
 
@@ -386,6 +387,8 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	wait_info.pSemaphores    = &m_semaphore;
 	wait_info.pValues        = &tick;
 
+	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuWaits,
+	                                         Common::DebugCounters::Counter::GpuWaitNs);
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
     if (result != vk::Result::eSuccess) {
         ReportSemaphoreError("wait", result, tick, CurrentTick(), KnownGpuTick());

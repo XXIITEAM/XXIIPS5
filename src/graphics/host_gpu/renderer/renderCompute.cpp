@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -22,6 +23,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
 #include "kernel/eventQueue.h"
+#include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
@@ -51,8 +53,8 @@ static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::Descriptor
 	return true;
 }
 
-bool RenderExecutor::TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
-                                                const CommandBuffer&          buffer) {
+void RenderExecutor::UpdateComputeMetaClears(const ShaderComputeInputInfo& input,
+                                            const CommandBuffer&          buffer) {
 	const auto& program   = *input.stage.program;
 	const auto& resources = *input.stage.resources;
 	if (resources.buffers.size() != program.info.buffers.size()) {
@@ -62,10 +64,9 @@ bool RenderExecutor::TryConsumeComputeMetaClear(const ShaderComputeInputInfo& in
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
 		const auto& resource   = program.info.buffers[i];
 		const auto  descriptor = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
-		// A metadata resource that is also read is not proven to be a full overwrite. Execute it
-		// conservatively instead of replacing the dispatch with a coarse full-surface clear.
+		// Reads and transforms of metadata do not establish a clear state.
 		if ((!resource.written || resource.read) && cache.IsMeta(descriptor.Base48())) {
-			return false;
+			return;
 		}
 	}
 
@@ -75,13 +76,10 @@ bool RenderExecutor::TryConsumeComputeMetaClear(const ShaderComputeInputInfo& in
 			if (resource.written) {
 				const auto descriptor =
 				    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
-				if (cache.ClearMeta(descriptor.Base48())) {
-					return true;
-				}
+				(void)cache.ClearMeta(descriptor.Base48());
 			}
 		}
 	}
-	return false;
 }
 
 bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x,
@@ -99,9 +97,10 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
 	constexpr std::array formats {
 	    Prospero::BufferFormat::k32UInt, Prospero::BufferFormat::k32_32UInt,
 	    Prospero::BufferFormat::k32_32_32UInt, Prospero::BufferFormat::k32_32_32_32UInt};
+	// Offset-or-swizzle bounds do not describe the element range proved by the shader.
 	if (descriptor.Stride() != element_size || descriptor.Format() != formats[fill.words - 1] ||
 	    descriptor.SwizzleEnabled() || descriptor.IndexStride() != 0 || descriptor.AddTid() ||
-	    descriptor.Base48() == 0) {
+	    descriptor.OutOfBounds() == 3 || descriptor.Base48() == 0) {
 		return false;
 	}
 	if (input.threads_num[0] == 0 || input.threads_num[0] != fill.group_stride[0] ||
@@ -113,7 +112,11 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
 	                                 ? group_x
 	                                 : static_cast<uint64_t>(group_x) * input.threads_num[0];
 	const auto     size        = descriptor.GetSize();
-	if (invocations != descriptor.NumRecords() || size == 0 || size > UINT32_MAX ||
+	const auto elements = descriptor.NumRecords();
+	const bool covered = fill.bounded_elements != 0
+	                         ? fill.bounded_elements == elements && invocations >= elements
+	                         : invocations == elements;
+	if (!covered || invocations > uint64_t {UINT32_MAX} + 1 || size == 0 || size > UINT32_MAX ||
 	    (input.dispatch_thread_dimensions &&
 	     (group_x % input.threads_num[0] != 0 || input.dispatch_threads_num[0] != group_x ||
 	      input.dispatch_threads_num[1] != 1 || input.dispatch_threads_num[2] != 1))) {
@@ -257,10 +260,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		return;
 	}
 
-	if (sh_ctx.GetCs().cs_regs.data_addr == 0) {
-		return;
-	}
-
 	constexpr uint32_t DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS = 1u << 5u;
 	constexpr uint32_t DISPATCH_INITIATOR_BASE_BITS             = 0x41u;
 	constexpr uint32_t DISPATCH_INITIATOR_MODIFIER_BITS         = 0xa038u;
@@ -364,12 +363,14 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
         }
         std::fflush(stderr);
     }
-	if (resources.specialization_reads.empty() &&
-	    (TryConsumeComputeMetaClear(input_info, buffer) ||
-	     TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
-	                                 thread_group_z, mode))) {
-		ResetBindings();
-		return;
+	if (resources.specialization_reads.empty()) {
+		// Cached metadata addresses can be reused as ordinary buffers; preserve their guest writes.
+		UpdateComputeMetaClears(input_info, buffer);
+		if (TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
+		                               thread_group_z, mode)) {
+			ResetBindings();
+			return;
+		}
 	}
 
 	if (use_thread_dimensions) {
@@ -434,11 +435,12 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		    });
 		const uint32_t frame_num = static_cast<uint32_t>(m_context.GetGpu().GetFrameNum());
 		LOGF("GraphicsRenderDispatchDirect: frame=%u shader=0x%016" PRIx64
-		     " hash=0x%016" PRIx64 " tick=%" PRIu64
+		     " hash=0x%016" PRIx64 " tick=%" PRIu64 " completed_tick=%" PRIu64
 		     " groups=%ux%ux%u mode=0x%08" PRIx32 " local=%ux%ux%u "
 		     "buffers=%zu textures=%zu sampled=%zu storage=%zu samplers=%zu push=%u\n",
 		     frame_num, sh_ctx.GetCs().cs_regs.data_addr, program.shader_hash,
 		     m_context.GetCommandScheduler().CurrentTick(),
+		     m_context.GetCommandScheduler().GetMasterSemaphore().KnownGpuTick(),
 		     thread_group_x, thread_group_y, thread_group_z, mode,
 		     input_info.threads_num[0], input_info.threads_num[1],
 		     input_info.threads_num[2], program.info.buffers.size(), program.info.images.size(),
@@ -523,6 +525,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
         }
     } else {
         vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+        Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 #if KYTY_DIAGNOSTIC_RUNTIME
         buffer.RecordGpuTrace(GpuTrace::Kind::Dispatch, thread_group_x,
                               thread_group_y, thread_group_z, program.shader_hash);
@@ -543,12 +546,19 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                    static_cast<uint32_t>(args_addr), static_cast<uint32_t>(args_addr >> 32u),
 	                    0, mode, buffer.GetShaders().GetCs().cs_regs.data_addr);
 	Common::LockGuard lock(m_context.GetMutex());
+	vk::DispatchIndirectCommand args {};
+	if (!m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
+	    LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args)) &&
+	    (args.x == 0 || args.y == 0 || args.z == 0)) {
+		return;
+	}
 	const auto& cs_regs = buffer.GetShaders().GetCs();
 	if (cs_regs.cs_regs.data_addr == 0) {
 		return;
 	}
 	ShaderComputeInputInfo input_info {};
 	input_info.async_compute = async_compute;
+	input_info.indirect_args_address = args_addr;
 	const auto compute_program = m_context.GetPipelineCache().GetComputeProgram(
 	    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info);
 	buffer.EndRendering();
@@ -602,6 +612,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	buffer.RecordGpuTrace(GpuTrace::Kind::DispatchIndirect, 1, 0, 0,
 	                      program.shader_hash, args_offset);
 #endif
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 }
