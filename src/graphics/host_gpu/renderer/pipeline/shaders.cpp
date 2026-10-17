@@ -504,7 +504,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	Developer::TraceNativePipelineLayout("graphics",
 	                          std::span<const vk::DescriptorSetLayoutBinding>(descriptor_bindings),
 	                          push_constants,result==vk::Result::eSuccess,
-	                          std::span(tracedModules.data(),tracedCount),
+	                          std::span<const TracedShaderModule>(tracedModules.data(),tracedCount),
 	                          !rect_list && tracedCount==shader_stage_count);
 #endif
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
@@ -657,7 +657,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	Developer::TraceNativePipelineLayout("compute",
 	                          std::span<const vk::DescriptorSetLayoutBinding>(descriptor_bindings),
 	                          push_constants,result==vk::Result::eSuccess,
-	                          std::span(&tracedModule,1),true);
+	                          std::span<const TracedShaderModule>(&tracedModule,1),true);
 #endif
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
