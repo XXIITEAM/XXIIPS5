@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <span>
 #include <string>
 
@@ -28,6 +29,39 @@ inline bool NativeLayoutTraceEnabled() {
     return enabled;
 }
 
+// SPV8: one process-wide counter shared by all template instantiations,
+// both graphics and compute. Only an explicitly armed Developer launch can
+// select one late window, and the total output is STILL 64 receipts.
+inline uint32_t NativeLayoutTraceSkip() {
+    static const uint32_t skip=[] {
+        if(!NativeLayoutTraceEnabled())return 0u;
+        const char* selected=std::getenv("XXII_GPU_TRACE_SKIP");
+        if(!selected || !*selected)return 0u;
+        constexpr uint32_t options[]={0,64,128,256,512,1024,2048,4096};
+        for(uint32_t candidate:options) {
+            char expected[12]{};
+            std::snprintf(expected,sizeof(expected),"%u",candidate);
+            if(std::strcmp(selected,expected)==0)return candidate;
+        }
+        // Invalid, oversized or noncanonical environment values cannot
+        // enlarge the collection window or silently choose a late interval.
+        return 0u;
+    }();
+    return skip;
+}
+inline uint32_t NativeLayoutTraceNextSequence() {
+    static std::atomic<uint32_t> observed{0};
+    const uint32_t skip=NativeLayoutTraceSkip();
+    uint32_t prior=observed.load(std::memory_order_relaxed);
+    while(prior<skip+64) {
+        if(observed.compare_exchange_weak(prior,prior+1,
+                                          std::memory_order_relaxed)) {
+            return prior<skip ? 0u : prior-skip+1u;
+        }
+    }
+    return 0; // no more atomics or receipts after the capped window
+}
+
 // Binding, Push and Module are small standard Vk/vk-hpp-compatible
 // structures. Module must have (stage, program), program must contain the
 // final SPIR-V XXH3_128 pair, word count and process-local program id.
@@ -40,9 +74,8 @@ inline uint32_t TraceNativePipelineLayout(
     std::span<const Module> modules, bool complete,
     FILE* sink=stderr) {
     if(!NativeLayoutTraceEnabled() || sink==nullptr)return 0;
-    static std::atomic<uint32_t> next{0};
-    const uint32_t seq=next.fetch_add(1,std::memory_order_relaxed)+1;
-    if(seq>64)return 0; // a fixed, per-process receipt budget
+    const uint32_t seq=NativeLayoutTraceNextSequence();
+    if(seq==0)return 0; // skipped or outside bounded 64-layout window
 
     constexpr size_t MaxBindings=16;
     constexpr uint64_t MaxDescriptors=4096;
