@@ -533,6 +533,40 @@ static int Main(int argc, char* argv[]) {
 		return 0;
 	}
 
+#if KYTY_DIAGNOSTIC_RUNTIME
+	// P2-F2C2: one bounded, optional receipt from the actual argument parser.
+	// This precedes guest execution and proves neither GPU init nor gameplay.
+	const char* requested_receipt = std::getenv("XXII_COMPAT_LAUNCH_RECEIPT");
+	if (requested_receipt != nullptr && requested_receipt[0] == '1' &&
+	    requested_receipt[1] == '\0') {
+		const auto& cfg = options.config;
+		const char* present = cfg.present_mode == Config::PresentMode::Fifo ? "Fifo"
+		                    : cfg.present_mode == Config::PresentMode::Immediate ? "Immediate"
+		                                                                          : "Mailbox";
+		const char* shader = cfg.shader_optimization_type == Config::ShaderOptimizationType::Size
+		                         ? "Size"
+		                     : cfg.shader_optimization_type == Config::ShaderOptimizationType::Performance
+		                         ? "Performance"
+		                         : "None";
+		// Fixed scalars only. No argv, selected game path, shader code or memory.
+		std::printf("XXII_RUNTIME_LAUNCH_PROFILE_V1 present=%s shader=%s gpu=%d"
+		            " width=%u height=%u vblank=%u network=%d vk_validation=%d"
+		            " shader_validation=%d hdr=%d gpu_av=%d vibration=%u volume=%u\n",
+		            present, shader, static_cast<int>(cfg.gpu_index),
+		            static_cast<unsigned>(cfg.screen_width),
+		            static_cast<unsigned>(cfg.screen_height),
+		            static_cast<unsigned>(cfg.vblank_frequency),
+		            static_cast<int>(cfg.network_connected),
+		            static_cast<int>(cfg.vulkan_validation_enabled),
+		            static_cast<int>(cfg.shader_validation_enabled),
+		            static_cast<int>(cfg.hdr_enabled),
+		            static_cast<int>(cfg.gpu_assisted_validation_enabled),
+		            static_cast<unsigned>(cfg.controller_vibration_intensity),
+		            static_cast<unsigned>(cfg.controller_speaker_volume));
+		std::fflush(stdout);
+	}
+#endif
+
 	Run(options);
 
 	return 0;
