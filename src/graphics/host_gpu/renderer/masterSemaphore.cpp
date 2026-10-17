@@ -156,7 +156,9 @@ void MasterSemaphore::DumpDeviceFault() const {
         return;
     }
 
-    constexpr uint32_t max_faults = 8;
+    // Private post-loss query only: permit up to sixteen categorical
+    // reports, never print the GPU addresses or vendor crash binary.
+    constexpr uint32_t max_faults = 16;
     std::array<VkDeviceFaultAddressInfoEXT, max_faults> addresses {};
     std::array<VkDeviceFaultVendorInfoEXT, max_faults> vendors {};
     const uint32_t available_addresses = counts.addressInfoCount;
