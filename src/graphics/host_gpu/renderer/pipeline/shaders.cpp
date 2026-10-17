@@ -20,12 +20,67 @@
 
 #include <algorithm>
 #include <cstdio>
+#if defined(XXII_DEV_GPU_LAYOUT_TRACE)
+#include <atomic>
+#include <cstdlib>
+#include <string>
+#endif
 #include <bit>
 #include <limits>
 #include <span>
 #include <vector>
 
 namespace Libs::Graphics {
+
+// P0-SPV4: from the exact VkDescriptorSetLayoutBinding vector used to
+// construct the native pipeline. A finite, opt-in numeric stderr receipt.
+#if defined(XXII_DEV_GPU_LAYOUT_TRACE)
+static void TraceNativePipelineLayout(
+    const char* pipeline_class,
+    std::span<const vk::DescriptorSetLayoutBinding> bindings,
+    const vk::PushConstantRange& push, vk::Result creation_result) {
+    static const bool enabled=[] {
+        const char* probe=std::getenv("XXII_COMPAT_PROBE");
+        const char* trace=std::getenv("XXII_GPU_LAYOUT_TRACE");
+        return probe && probe[0]=='1' && probe[1]=='\0' &&
+               trace && trace[0]=='1' && trace[1]=='\0';
+    }();
+    if(!enabled)return;
+    static std::atomic<uint32_t> next{0};
+    const uint32_t seq=next.fetch_add(1,std::memory_order_relaxed)+1;
+    if(seq>64)return;
+
+    constexpr size_t MaxBindings=16;
+    constexpr uint64_t MaxDescriptors=4096;
+    uint64_t total=0;
+    for(const auto& binding:bindings)total+=binding.descriptorCount;
+    const bool capped=bindings.size()>MaxBindings || total>MaxDescriptors;
+    std::string tuples=capped ? "CAP" : "-";
+    if(!capped && !bindings.empty()) {
+        tuples.clear();
+        for(const auto& binding:bindings) {
+            if(!tuples.empty())tuples.push_back(';');
+            tuples+=std::to_string(binding.binding);
+            tuples.push_back(':');
+            tuples+=std::to_string(static_cast<uint32_t>(binding.descriptorType));
+            tuples.push_back(':');
+            tuples+=std::to_string(binding.descriptorCount);
+            tuples.push_back(':');
+            tuples+=std::to_string(static_cast<uint32_t>(binding.stageFlags));
+        }
+    }
+    // No shader code, game paths, names, handles, addresses or pointers.
+    std::fprintf(stderr,
+       "XXII_GPU_LAYOUT_V1 seq=%u class=%s created=%d bindings=%u total=%u "
+       "push_offset=%u push_size=%u push_stages=%u tuples=%s\n",
+       seq,pipeline_class,creation_result==vk::Result::eSuccess?1:0,
+       static_cast<unsigned>(std::min(bindings.size(),size_t(999))),
+       static_cast<unsigned>(std::min(total,uint64_t(65535))),
+       push.offset,push.size,static_cast<uint32_t>(push.stageFlags),
+       tuples.c_str());
+    std::fflush(stderr);
+}
+#endif
 
 // IDK: maybe we can remove it?
 constexpr uint8_t kTemporaryVertexAttribFormat113 =
@@ -470,6 +525,9 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		LOGF("PipelineTrace: vkCreatePipelineLayout done result=%s layout=%p\n",
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline_layout));
 	}
+#if defined(XXII_DEV_GPU_LAYOUT_TRACE)
+	TraceNativePipelineLayout("graphics",descriptor_bindings,push_constants,result);
+#endif
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline_layout == nullptr);
@@ -614,6 +672,9 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	                                                  &pipeline.pipeline_layout);
 	LOGF("PipelineTrace: vkCreatePipelineLayout CS done result=%s layout=%p\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline_layout));
+#if defined(XXII_DEV_GPU_LAYOUT_TRACE)
+	TraceNativePipelineLayout("compute",descriptor_bindings,push_constants,result);
+#endif
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline_layout == nullptr);

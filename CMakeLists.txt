@@ -388,6 +388,13 @@ list(APPEND check_headers
 # The virtual-memory test retains its own build because it injects
 # KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS into runtime sources.
 add_library(kyty_emulator_objects OBJECT ${kyty_emulator_src})
+# Only recompile the Vulkan pipeline source, not the entire runtime:
+# the optional Developer receipt must cost nothing in other translation units.
+if(PSVXXII_EDITION STREQUAL "DEVELOPER")
+    set_source_files_properties(
+        "${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/shaders.cpp"
+        PROPERTIES COMPILE_DEFINITIONS XXII_DEV_GPU_LAYOUT_TRACE=1)
+endif()
 target_include_directories(kyty_emulator_objects PRIVATE ${inc_headers})
 target_link_libraries(kyty_emulator_objects PRIVATE ${kyty_emulator_link_libraries})
 
