@@ -394,7 +394,14 @@ public:
         const uint64_t end = start + size;
         uint64_t cursor = start;
         int previous_mode = -1;
-        for (const auto& range : m_ranges) {
+        // Sorted ranges: seek near the requested span before walking at
+        // most 64 intersecting Code regions. No whole-process O(N) scan.
+        auto current = std::upper_bound(
+            m_ranges.begin(), m_ranges.end(), start,
+            [](uint64_t addr, const Range& item) { return addr < item.start; });
+        if (current != m_ranges.begin()) --current;
+        for (; current != m_ranges.end(); ++current) {
+            const auto& range = *current;
             const uint64_t range_end = End(range.start, range.size);
             if (range_end <= cursor) continue;
             if (range.start > cursor || range.type != VirtualRangeType::Code)

@@ -33,6 +33,7 @@
 #include <fmt/format.h>
 #include <magic_enum.hpp>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -1824,6 +1825,38 @@ static void EmitMemoryFreed(int32_t program_id) {
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 // Uses exactly the same endpoint samplers as the loader receipts, on an
 // actual owned guest/host allocation rather than simulated stdout strings.
+bool TestRuntimeMemoryConcurrentSemanticSpan() {
+    using Libs::LibKernel::Memory::InspectProgramMappingSpan;
+    using Libs::LibKernel::Memory::AllocateProgramMemory;
+    using Libs::LibKernel::Memory::FreeGuestMemory;
+    using Common::VirtualMemory::Mode;
+    constexpr uint64_t page = 0x4000;
+    const auto base = AllocateProgramMemory(0, page * 3, Mode::ReadWrite,
+                                            "concurrent_span_fixture");
+    if (base == 0) return false;
+    std::atomic<bool> finished {false};
+    std::thread writer([&] {
+        for (int iteration = 0; iteration < 96; ++iteration)
+            Libs::LibKernel::Memory::SetProgramMemoryProtection(
+                base + page, page,
+                iteration % 2 == 0 ? Mode::Read : Mode::ReadWrite);
+        finished.store(true, std::memory_order_release);
+    });
+    bool coherent = true;
+    for (int iteration=0; iteration<768; ++iteration) {
+        const auto sample = InspectProgramMappingSpan(base, page * 3);
+        coherent = coherent && sample.full && !sample.capped &&
+                   ((sample.regions == 1 && !sample.mixed_protections) ||
+                    (sample.regions == 3 && sample.mixed_protections));
+        if (finished.load(std::memory_order_acquire) && iteration>=96) break;
+        std::this_thread::yield();
+    }
+    writer.join();
+    const auto final = InspectProgramMappingSpan(base, page * 3);
+    const bool freed=FreeGuestMemory(base, page * 3);
+    return coherent && final.full && final.regions == 1 &&
+           !final.mixed_protections && freed;
+}
 bool TestRuntimeMemoryFullSpanSummary() {
     using Libs::LibKernel::Memory::InspectProgramMappingSpan;
     using Libs::LibKernel::Memory::AllocateProgramMemory;

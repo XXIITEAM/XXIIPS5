@@ -3203,6 +3203,12 @@ void TestProgramMemoryAllocationAndProtection() {
 }
 
 #if KYTY_DIAGNOSTIC_RUNTIME
+void TestRuntimeMemoryConcurrentSemanticSpan() {
+    const char* test = "RuntimeMemoryConcurrentSemanticSpan";
+    Check(test, Loader::TestRuntimeMemoryConcurrentSemanticSpan(),
+          "Guest Code span was not locked consistently with concurrent protection updates");
+    std::printf("[host]    %-48s ok\n", test);
+}
 void TestRuntimeMemoryFullSpanSummary() {
     const char* test = "RuntimeMemoryFullSpanSummary";
     Check(test, Loader::TestRuntimeMemoryFullSpanSummary(),
@@ -4553,6 +4559,7 @@ int main(int argc, char** argv) {
 #if KYTY_DIAGNOSTIC_RUNTIME
 	RunTest(TestRuntimeMemoryMapEndpointSampling);
 	RunTest(TestRuntimeMemoryFullSpanSummary);
+	RunTest(TestRuntimeMemoryConcurrentSemanticSpan);
 #endif
 
 	if (g_failed_tests != 0) {
