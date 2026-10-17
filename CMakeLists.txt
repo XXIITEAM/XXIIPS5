@@ -201,22 +201,16 @@ config_compiler_and_linker()
 add_subdirectory("${KYTY_THIRD_PARTY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/3rdparty")
 add_subdirectory("${KYTY_SOURCE_DIR}/common" "${CMAKE_CURRENT_BINARY_DIR}/common")
 
-# Product edition isolation must reach the guest runtime, not just Qt.
-# Non-PSVXXII builds retain the upstream diagnostic behavior.
-if(KYTY_BUILD_LAUNCHER AND WIN32)
-	option(XXII_BUILD_PSVXXII "Build new Qt Quick controller-first frontend" ON)
+# Optional diagnostic instrumentation must reach the guest runtime, not just a
+# frontend. Embedding products can compile it out (KYTY_DIAGNOSTIC_RUNTIME=OFF);
+# standalone builds keep the historical behavior.
+option(KYTY_DIAGNOSTIC_RUNTIME "Compile optional diagnostic runtime instrumentation" ON)
+if(KYTY_DIAGNOSTIC_RUNTIME)
+	target_compile_definitions(common PUBLIC KYTY_DIAGNOSTIC_RUNTIME=1)
+else()
+	target_compile_definitions(common PUBLIC KYTY_DIAGNOSTIC_RUNTIME=0)
 endif()
-if(KYTY_BUILD_LAUNCHER AND XXII_BUILD_PSVXXII)
-	set(PSVXXII_EDITION "RELEASE" CACHE STRING "PSVXXII product edition: RELEASE or DEVELOPER")
-	if(NOT PSVXXII_EDITION STREQUAL "RELEASE" AND NOT PSVXXII_EDITION STREQUAL "DEVELOPER")
-		message(FATAL_ERROR "Unknown PSVXXII_EDITION='${PSVXXII_EDITION}'")
-	endif()
-	if(PSVXXII_EDITION STREQUAL "RELEASE")
-		target_compile_definitions(common PUBLIC KYTY_DIAGNOSTIC_RUNTIME=0)
-	else()
-		target_compile_definitions(common PUBLIC KYTY_DIAGNOSTIC_RUNTIME=1)
-	endif()
-endif()
+option(KYTY_DEV_GPU_LAYOUT_TRACE "Compile the opt-in GPU layout trace receipt" OFF)
 
 file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
 	"${KYTY_SOURCE_DIR}/libs/*.cpp"
@@ -390,7 +384,7 @@ list(APPEND check_headers
 add_library(kyty_emulator_objects OBJECT ${kyty_emulator_src})
 # Only recompile the Vulkan pipeline source, not the entire runtime:
 # the optional Developer receipt must cost nothing in other translation units.
-if(PSVXXII_EDITION STREQUAL "DEVELOPER")
+if(KYTY_DEV_GPU_LAYOUT_TRACE)
     set_source_files_properties(
         "${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/shaders.cpp"
         "${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp"
@@ -620,11 +614,6 @@ add_executable(gpu_descriptor_bounds_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(gpu_descriptor_bounds_tests PRIVATE ${inc_headers})
 
-add_executable(compatibility_patch_policy_tests EXCLUDE_FROM_ALL
-    "${KYTY_TESTS_DIR}/CompatibilityPatchPolicyTests.cpp"
-)
-target_include_directories(compatibility_patch_policy_tests PRIVATE ${inc_headers})
-
 add_executable(gpu_resource_lifetime_tests EXCLUDE_FROM_ALL
     "${KYTY_TESTS_DIR}/GpuResourceLifetimeTests.cpp"
 )
@@ -688,20 +677,6 @@ if(NOT KYTY_CLANG_CL)
 endif()
 
 if(BUILD_TESTING)
-    # Optional tests inspect synthetic numeric GPU logs only: no game files or GPU required.
-    find_package(Python3 QUIET COMPONENTS Interpreter)
-    if(Python3_Interpreter_FOUND)
-        add_test(NAME gpu_incident_diagnostics_python
-                 COMMAND ${Python3_EXECUTABLE} -m unittest discover
-                         -s "${KYTY_TESTS_DIR}" -p "test_gpu_*py")
-        set_tests_properties(gpu_incident_diagnostics_python PROPERTIES
-                             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
-        add_test(NAME psvxxii_triage_delta_python
-                 COMMAND ${Python3_EXECUTABLE} -m unittest discover
-                         -s "${KYTY_TESTS_DIR}" -p "test_psvxxii_triage_compare.py")
-        set_tests_properties(psvxxii_triage_delta_python PROPERTIES
-                             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
-    endif()
 	add_test(NAME emulator_user_name_cli
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --user-name 1234567890123456)
 	add_test(NAME emulator_user_name_too_long
@@ -721,7 +696,7 @@ if(BUILD_TESTING)
 	add_test(NAME gpu_descriptor_bounds COMMAND $<TARGET_FILE:gpu_descriptor_bounds_tests>)
 	add_test(NAME gpu_resource_lifetime COMMAND $<TARGET_FILE:gpu_resource_lifetime_tests>)
 	set(kyty_resource_diagnostic ON)
-	if(KYTY_BUILD_LAUNCHER AND XXII_BUILD_PSVXXII AND PSVXXII_EDITION STREQUAL "RELEASE")
+	if(NOT KYTY_DIAGNOSTIC_RUNTIME)
 		set(kyty_resource_diagnostic OFF)
 	endif()
 	add_test(NAME gpu_resource_lifetime_edition COMMAND ${CMAKE_COMMAND}
@@ -745,7 +720,6 @@ if(BUILD_TESTING)
 		set_tests_properties(gpu_resource_lifetime_capture PROPERTIES
 			RESOURCE_LOCK xxii_vulkan_gpu RUN_SERIAL TRUE)
 	endif()
-	add_test(NAME compatibility_patch_policy COMMAND $<TARGET_FILE:compatibility_patch_policy_tests>)
 	add_test(NAME gpu_index_bounds COMMAND $<TARGET_FILE:gpu_index_bounds_tests>)
 	add_test(NAME hle_trace COMMAND $<TARGET_FILE:hle_trace_tests>)
 	add_test(NAME frame_timing COMMAND $<TARGET_FILE:frame_timing_tests>)
@@ -857,7 +831,6 @@ if(BUILD_TESTING)
 		gpu_flight_recorder_tests
 		gpu_descriptor_bounds_tests
 		gpu_resource_lifetime_tests
-		compatibility_patch_policy_tests
 		gpu_index_bounds_tests
 		hle_trace_tests
 		frame_timing_tests
@@ -981,24 +954,6 @@ endif()
 install(TARGETS kyty_emulator DESTINATION .)
 if(KYTY_BUILD_LAUNCHER)
 	add_subdirectory("${KYTY_SOURCE_DIR}/launcher" "${CMAKE_CURRENT_BINARY_DIR}/launcher")
-
-	# PSVXXII is independent of the legacy Qt Widgets launcher and the guest runtime.
-	# Quick support is required when this option is enabled: CI must validate the
-	# real application rather than silently skipping its build.
-	# Ship and test PSVXXII on Windows first. Preserve the historical
-	# Linux/macOS build requirements until those UI toolchains are validated.
-	if(WIN32)
-		set(_psvxxii_default ON)
-	else()
-		set(_psvxxii_default OFF)
-	endif()
-	option(XXII_BUILD_PSVXXII "Build new Qt Quick controller-first frontend" ${_psvxxii_default})
-	unset(_psvxxii_default)
-	if(XXII_BUILD_PSVXXII)
-		find_package(Qt6 COMPONENTS Quick Qml QuickControls2 REQUIRED)
-		add_subdirectory("${KYTY_SOURCE_DIR}/psvxxii" "${CMAKE_CURRENT_BINARY_DIR}/psvxxii")
-	endif()
-
 	if(LINUX)
 		target_link_options(launcher PRIVATE $<$<CONFIG:Release>:-Wl,--strip-all>)
 	endif()
@@ -1006,3 +961,11 @@ endif()
 if(KYTY_CLANG_CL)
 	install(FILES "${KYTY_THIRD_PARTY_DIR}/winpthread/bin/libwinpthread-1.dll" DESTINATION .)
 endif()
+
+# Embedding projects (for example the PSVXXII frontend) can build their own
+# directories inside this scope, once every Kyty target, variable and compiler
+# setting is defined. Each entry is an absolute source directory.
+foreach(kyty_external_dir IN LISTS KYTY_EXTERNAL_SUBDIRECTORIES)
+	get_filename_component(kyty_external_name "${kyty_external_dir}" NAME)
+	add_subdirectory("${kyty_external_dir}" "${CMAKE_CURRENT_BINARY_DIR}/external/${kyty_external_name}")
+endforeach()
