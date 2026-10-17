@@ -33,16 +33,16 @@ inline bool NativeLayoutTraceEnabled() {
 // final SPIR-V XXH3_128 pair, word count and process-local program id.
 // No independent trace formatter or pipeline descriptor builder exists.
 template <typename Binding,typename Push,typename Module>
-inline void TraceNativePipelineLayout(
+inline uint32_t TraceNativePipelineLayout(
     const char* pipeline_class,
     std::span<const Binding> bindings,
     const Push& push, bool created,
     std::span<const Module> modules, bool complete,
     FILE* sink=stderr) {
-    if(!NativeLayoutTraceEnabled() || sink==nullptr)return;
+    if(!NativeLayoutTraceEnabled() || sink==nullptr)return 0;
     static std::atomic<uint32_t> next{0};
     const uint32_t seq=next.fetch_add(1,std::memory_order_relaxed)+1;
-    if(seq>64)return; // a fixed, per-process receipt budget
+    if(seq>64)return 0; // a fixed, per-process receipt budget
 
     constexpr size_t MaxBindings=16;
     constexpr uint64_t MaxDescriptors=4096;
@@ -105,6 +105,25 @@ inline void TraceNativePipelineLayout(
         push.offset,push.size,static_cast<uint32_t>(push.stageFlags),
         tuples.c_str(),static_cast<unsigned>(std::min(modules.size(),size_t(4))),
         fullIdentity?1u:0u,ids.c_str());
+    std::fflush(sink);
+    return seq;
+}
+
+// SPV7: emitted only AFTER vkCreateGraphicsPipelines or
+// vkCreateComputePipelines returned. It joins a V2 layout receipt by its
+// bounded process-local sequence without exposing any Vulkan handle.
+// A success claim is NOT proof of dispatch, presentation or gameplay.
+inline void TraceNativePipelineResult(uint32_t layoutSeq,
+                                      const char* pipelineClass,
+                                      int resultCode, bool pipelineExists,
+                                      FILE* sink=stderr) {
+    if(!NativeLayoutTraceEnabled() || sink==nullptr ||
+       layoutSeq==0 || layoutSeq>64)return;
+    // Call sites pass fixed "compute"/"graphics" vocabulary only.
+    const bool created=(resultCode==0 && pipelineExists);
+    std::fprintf(sink,
+        "XXII_GPU_PIPELINE_V1 seq=%u class=%s created=%u vk_code=%d\n",
+        layoutSeq,pipelineClass,created?1u:0u,resultCode);
     std::fflush(sink);
 }
 

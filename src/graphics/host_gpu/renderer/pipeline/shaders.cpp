@@ -501,7 +501,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	}
 	// RectList injects two additional internal shader modules, for which
 	// the guest shader ProgramCache holds no final-SPIR-V identity.
-	Developer::TraceNativePipelineLayout("graphics",
+	const uint32_t tracedLayoutSeq =
+	    Developer::TraceNativePipelineLayout("graphics",
 	                          std::span<const vk::DescriptorSetLayoutBinding>(descriptor_bindings),
 	                          push_constants,result==vk::Result::eSuccess,
 	                          std::span<const TracedShaderModule>(tracedModules.data(),tracedCount),
@@ -585,6 +586,11 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		LOGF("PipelineTrace: vkCreateGraphicsPipelines done result=%s pipeline=%p\n",
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	}
+#if defined(XXII_DEV_GPU_LAYOUT_TRACE)
+	Developer::TraceNativePipelineResult(
+	    tracedLayoutSeq,"graphics",static_cast<int>(result),
+	    result==vk::Result::eSuccess && pipeline.pipeline!=nullptr);
+#endif
 	if (result != vk::Result::eSuccess) {
 		// A pipeline driver failure must expose its VkResult before the fatal exit.
 		std::fprintf(stderr,
@@ -654,7 +660,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 #if defined(XXII_DEV_GPU_LAYOUT_TRACE)
 	const TracedShaderModule tracedModule{
 	    static_cast<uint32_t>(vk::ShaderStageFlagBits::eCompute),&compute_program};
-	Developer::TraceNativePipelineLayout("compute",
+	const uint32_t tracedLayoutSeq =
+	    Developer::TraceNativePipelineLayout("compute",
 	                          std::span<const vk::DescriptorSetLayoutBinding>(descriptor_bindings),
 	                          push_constants,result==vk::Result::eSuccess,
 	                          std::span<const TracedShaderModule>(&tracedModule,1),true);
@@ -676,6 +683,11 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	                                                &pipeline.pipeline);
 	LOGF("PipelineTrace: vkCreateComputePipelines done result=%s pipeline=%p\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
+#if defined(XXII_DEV_GPU_LAYOUT_TRACE)
+	Developer::TraceNativePipelineResult(
+	    tracedLayoutSeq,"compute",static_cast<int>(result),
+	    result==vk::Result::eSuccess && pipeline.pipeline!=nullptr);
+#endif
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
