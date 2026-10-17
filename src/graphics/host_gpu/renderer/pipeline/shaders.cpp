@@ -17,6 +17,9 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
+#if defined(XXII_DEV_GPU_LAYOUT_TRACE)
+#include "graphics/host_gpu/renderer/pipeline/nativeLayoutEvidence.h"
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -32,95 +35,13 @@
 
 namespace Libs::Graphics {
 
-// SPV4/SPV5: from the same Vulkan layout parameters and shader module
-// records actually passed to CreatePipelineInternal. Read-only, Developer
-// opt-in, finite CPU-side receipt; no driver capture or Guest memory dump.
+// SPV6: the Vulkan runtime and real-device fixture share the same
+// bounded, read-only emitter; no duplicate receipt implementation.
 #if defined(XXII_DEV_GPU_LAYOUT_TRACE)
 struct TracedShaderModule {
     uint32_t stage = 0;
     const ShaderProgram* program = nullptr;
 };
-
-static void TraceNativePipelineLayout(
-    const char* pipeline_class,
-    std::span<const vk::DescriptorSetLayoutBinding> bindings,
-    const vk::PushConstantRange& push, vk::Result creation_result,
-    std::span<const TracedShaderModule> modules, bool complete) {
-    static const bool enabled=[] {
-        const char* probe=std::getenv("XXII_COMPAT_PROBE");
-        const char* trace=std::getenv("XXII_GPU_LAYOUT_TRACE");
-        return probe && probe[0]=='1' && probe[1]=='\0' &&
-               trace && trace[0]=='1' && trace[1]=='\0';
-    }();
-    if(!enabled)return;
-    static std::atomic<uint32_t> next{0};
-    const uint32_t seq=next.fetch_add(1,std::memory_order_relaxed)+1;
-    if(seq>64)return;
-
-    constexpr size_t MaxBindings=16;
-    constexpr uint64_t MaxDescriptors=4096;
-    uint64_t total=0;
-    for(const auto& binding:bindings)total+=binding.descriptorCount;
-    const bool capped=bindings.size()>MaxBindings || total>MaxDescriptors;
-    std::string tuples=capped ? "CAP" : "-";
-    if(!capped && !bindings.empty()) {
-        tuples.clear();
-        for(const auto& binding:bindings) {
-            if(!tuples.empty())tuples.push_back(';');
-            tuples+=std::to_string(binding.binding);
-            tuples.push_back(':');
-            tuples+=std::to_string(static_cast<uint32_t>(binding.descriptorType));
-            tuples.push_back(':');
-            tuples+=std::to_string(binding.descriptorCount);
-            tuples.push_back(':');
-            tuples+=std::to_string(static_cast<uint32_t>(binding.stageFlags));
-        }
-    }
-
-    // Fingerprints are from the FINAL SPIR-V passed to vkCreateShaderModule,
-    // not the guest shader_hash or the pre-optimization shader. IDs are only
-    // meaningful inside the current guest process; no handles are logged.
-    const bool moduleCap=modules.empty() || modules.size()>4;
-    bool fullIdentity=complete && !moduleCap;
-    std::string moduleFields;
-    for(const auto& record:modules) {
-        if(!record.program || record.program->id==0 ||
-           record.program->evidence_words<5 ||
-           record.program->evidence_words>65536u ||
-           (record.program->evidence_low==0 && record.program->evidence_high==0)) {
-            fullIdentity=false;
-            break;
-        }
-        char digest[33]{};
-        std::snprintf(digest,sizeof(digest),"%016" PRIx64 "%016" PRIx64,
-                      record.program->evidence_high,record.program->evidence_low);
-        if(!moduleFields.empty())moduleFields.push_back(';');
-        moduleFields+=std::to_string(record.stage);
-        moduleFields.push_back(':');
-        moduleFields+=std::to_string(record.program->id);
-        moduleFields.push_back(':');
-        moduleFields+=std::to_string(record.program->evidence_words);
-        moduleFields.push_back(':');
-        moduleFields+=digest;
-    }
-    if(moduleCap || moduleFields.size()>320)fullIdentity=false;
-    // All-or-nothing: partial stage identities are not comparable. A
-    // special RectList shader or an absent digest blocks a full pairing.
-    if(!fullIdentity)moduleFields="CAP";
-    // No shader code, guest path, name, address, Vulkan handle or pointer.
-    // XXH3_128 is a fast non-cryptographic fingerprint, NOT an attestation.
-    std::fprintf(stderr,
-       "XXII_GPU_LAYOUT_V2 seq=%u class=%s created=%d bindings=%u total=%u "
-       "push_offset=%u push_size=%u push_stages=%u tuples=%s "
-       "modules=%u complete=%u ids=%s\n",
-       seq,pipeline_class,creation_result==vk::Result::eSuccess?1:0,
-       static_cast<unsigned>(std::min(bindings.size(),size_t(999))),
-       static_cast<unsigned>(std::min(total,uint64_t(65535))),
-       push.offset,push.size,static_cast<uint32_t>(push.stageFlags),
-       tuples.c_str(),static_cast<unsigned>(std::min(modules.size(),size_t(4))),
-       fullIdentity?1u:0u,moduleFields.c_str());
-    std::fflush(stderr);
-}
 #endif
 
 // IDK: maybe we can remove it?
@@ -580,7 +501,9 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	}
 	// RectList injects two additional internal shader modules, for which
 	// the guest shader ProgramCache holds no final-SPIR-V identity.
-	TraceNativePipelineLayout("graphics",descriptor_bindings,push_constants,result,
+	Developer::TraceNativePipelineLayout("graphics",
+	                          std::span<const vk::DescriptorSetLayoutBinding>(descriptor_bindings),
+	                          push_constants,result==vk::Result::eSuccess,
 	                          std::span(tracedModules.data(),tracedCount),
 	                          !rect_list && tracedCount==shader_stage_count);
 #endif
@@ -731,7 +654,9 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 #if defined(XXII_DEV_GPU_LAYOUT_TRACE)
 	const TracedShaderModule tracedModule{
 	    static_cast<uint32_t>(vk::ShaderStageFlagBits::eCompute),&compute_program};
-	TraceNativePipelineLayout("compute",descriptor_bindings,push_constants,result,
+	Developer::TraceNativePipelineLayout("compute",
+	                          std::span<const vk::DescriptorSetLayoutBinding>(descriptor_bindings),
+	                          push_constants,result==vk::Result::eSuccess,
 	                          std::span(&tracedModule,1),true);
 #endif
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
