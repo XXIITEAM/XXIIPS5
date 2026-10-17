@@ -3202,6 +3202,15 @@ void TestProgramMemoryAllocationAndProtection() {
 	std::printf("[host]    %-48s ok\n", test);
 }
 
+#if KYTY_DIAGNOSTIC_RUNTIME
+void TestRuntimeMemoryMapEndpointSampling() {
+	const char* test = "RuntimeMemoryMapEndpointSampling";
+	Check(test, Loader::TestRuntimeMemoryMapEndpointSampling(),
+	      "owned guest/host endpoint sampling, protection split, free or re-use inconsistent");
+	std::printf("[host]    %-48s ok\n", test);
+}
+#endif
+
 void TestModuleRelocationUsesWritableHostMapping() {
 	const char* test = "ModuleRelocationUsesWritableHostMapping";
 	Check(test, Loader::TestModuleRelocationUsesWritableHostMapping(),
@@ -4534,6 +4543,9 @@ int main(int argc, char** argv) {
 	RunTest(TestMemoryPoolCommitDecommitQueryFlags);
 	RunTest(TestProgramMemoryAllocationAndProtection);
 	RunTest(TestModuleRelocationUsesWritableHostMapping);
+#if KYTY_DIAGNOSTIC_RUNTIME
+	RunTest(TestRuntimeMemoryMapEndpointSampling);
+#endif
 
 	if (g_failed_tests != 0) {
 		std::printf("VirtualMemoryAllocationTests: %d case(s) failed\n", g_failed_tests);

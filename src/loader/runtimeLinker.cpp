@@ -1642,6 +1642,152 @@ void RuntimeLinker::DeleteTls(Program* program, int thread_id) {
 	}
 }
 
+#if KYTY_DIAGNOSTIC_RUNTIME
+// P2-B1a: opt-in loader-owned mapping receipts. Only fixed scalar endpoint
+// results leave this module; no guest pointers, paths, payloads or symbols.
+// Querying the first and final bytes is NOT proof that every page is mapped.
+static bool MemoryMapReceiptEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("XXII_COMPAT_MEMORY_MAP");
+		return value != nullptr && value[0] == '1' && value[1] == '\0';
+	}();
+	return enabled;
+}
+static bool SampleGuestEndpoints(uint64_t addr, uint64_t size, uint32_t* mode_out) {
+	if (addr == 0 || size == 0 || size > UINT64_MAX - addr) return false;
+	auto query = [](uint64_t point, Libs::LibKernel::Memory::VirtualQueryInfo* info) {
+		return Libs::LibKernel::Memory::KernelVirtualQuery(
+		            reinterpret_cast<const void*>(point), 0, info,
+		            sizeof(*info)) == 0 &&
+		       info->start <= point && info->end > point;
+	};
+	Libs::LibKernel::Memory::VirtualQueryInfo first {};
+	Libs::LibKernel::Memory::VirtualQueryInfo last {};
+	const bool valid = query(addr, &first) && query(addr + size - 1, &last);
+	if (mode_out != nullptr) {
+		*mode_out = valid &&
+		                   ((first.protection & 7) == (last.protection & 7))
+		                ? static_cast<uint32_t>(first.protection & 7)
+		                : 8u; // differing/missing sampled protection
+	}
+	return valid;
+}
+static uint32_t HostProtectionBits(uint32_t protect) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	if ((protect & ~uint32_t(0xff)) != 0) return 8; // GUARD or unknown modifiers
+	switch (protect) {
+		case PAGE_NOACCESS: return 0;
+		case PAGE_READONLY: return 1;
+		case PAGE_READWRITE:
+		case PAGE_WRITECOPY: return 3;
+		case PAGE_EXECUTE: return 4;
+		case PAGE_EXECUTE_READ: return 5;
+		case PAGE_EXECUTE_READWRITE:
+		case PAGE_EXECUTE_WRITECOPY: return 7;
+		default: return 8;
+	}
+#else
+	(void)protect;
+	return 8;
+#endif
+}
+static bool SampleHostEndpoints(uint64_t addr, uint64_t size, uint32_t* mode_out) {
+	if (mode_out != nullptr) *mode_out = 8;
+	if (addr == 0 || size == 0 || size > UINT64_MAX - addr) return false;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	MEMORY_BASIC_INFORMATION first {}, last {};
+	if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &first, sizeof(first)) != sizeof(first) ||
+	    VirtualQuery(reinterpret_cast<LPCVOID>(addr + size - 1), &last, sizeof(last)) != sizeof(last) ||
+	    first.State != MEM_COMMIT || last.State != MEM_COMMIT) return false;
+	if (mode_out != nullptr) {
+		const uint32_t a = HostProtectionBits(static_cast<uint32_t>(first.Protect));
+		const uint32_t b = HostProtectionBits(static_cast<uint32_t>(last.Protect));
+		*mode_out = a == b ? a : 8;
+	}
+	return true;
+#else
+	return false; // no Win32 host sample on other platforms in this increment
+#endif
+}
+static bool TakeMemoryReceiptSlot() {
+	static std::atomic_uint32_t count {0};
+	const auto number = count.fetch_add(1, std::memory_order_relaxed);
+	if (number == 128) {
+		std::printf("XXII_RUNTIME_MEMORY_V1 op=LIMIT\n");
+		std::fflush(stdout);
+	}
+	return number < 128;
+}
+static void EmitMemoryAllocated(const Program* p) {
+	if (!MemoryMapReceiptEnabled() || p == nullptr || p->unique_id <= 0) return;
+	if (!TakeMemoryReceiptSlot()) return;
+	uint32_t unused = 8;
+	const bool guest = SampleGuestEndpoints(p->base_vaddr, p->mapped_size, &unused);
+	const bool host = SampleHostEndpoints(p->base_vaddr, p->mapped_size, &unused);
+	const auto pages = p->mapped_size / 0x4000u;
+	if (pages == 0 || pages > 999999999ull) return;
+	std::printf("XXII_RUNTIME_MEMORY_V1 op=ALLOC id=%d pages=%" PRIu64 " guest=%u host=%u\n",
+	            p->unique_id, pages, guest ? 1u : 0u, host ? 1u : 0u);
+	std::fflush(stdout);
+}
+static void EmitMemorySegment(const Program* p, Elf64_Half index,
+                              uint64_t addr, uint64_t size,
+                              Common::VirtualMemory::Mode declared, bool skipped) {
+	if (!MemoryMapReceiptEnabled() || p == nullptr || p->unique_id <= 0) return;
+	if (!TakeMemoryReceiptSlot()) return;
+	uint32_t observed = 8, hostmode = 8;
+	const bool guest = SampleGuestEndpoints(addr, size, &observed);
+	const bool host = SampleHostEndpoints(addr, size, &hostmode);
+	std::printf("XXII_RUNTIME_MEMORY_V1 op=SEG id=%d index=%u"
+	            " declared=%u observed=%u hostmode=%u guest=%u host=%u skipped=%u\n",
+	            p->unique_id, static_cast<unsigned>(index),
+	            static_cast<unsigned>(declared), static_cast<unsigned>(observed),
+	            static_cast<unsigned>(hostmode), guest ? 1u : 0u,
+	            host ? 1u : 0u, skipped ? 1u : 0u);
+	std::fflush(stdout);
+}
+static void EmitMemoryFreed(int32_t program_id) {
+	if (!MemoryMapReceiptEnabled() || program_id <= 0) return;
+	if (!TakeMemoryReceiptSlot()) return;
+	std::printf("XXII_RUNTIME_MEMORY_V1 op=FREE id=%d released=1\n", program_id);
+	std::fflush(stdout);
+}
+#if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
+// Uses exactly the same endpoint samplers as the loader receipts, on an
+// actual owned guest/host allocation rather than simulated stdout strings.
+bool TestRuntimeMemoryMapEndpointSampling() {
+	constexpr uint64_t page = 0x4000;
+	const auto base = Libs::LibKernel::Memory::AllocateProgramMemory(
+	    0, page * 2, Common::VirtualMemory::Mode::ReadWrite, "memory_receipt_fixture");
+	if (base == 0) return false;
+	uint32_t guest_mode = 8, host_mode = 8;
+	const bool initially_mapped =
+	    SampleGuestEndpoints(base, page * 2, &guest_mode) && guest_mode == 3 &&
+	    SampleHostEndpoints(base, page * 2, &host_mode) && host_mode == 3;
+	Libs::LibKernel::Memory::SetProgramMemoryProtection(
+	    base, page, Common::VirtualMemory::Mode::Read);
+	guest_mode = 8;
+	host_mode  = 8;
+	const bool split_guest_protection =
+	    SampleGuestEndpoints(base, page * 2, &guest_mode) && guest_mode == 8;
+	const bool host_mode_is_independent =
+	    SampleHostEndpoints(base, page * 2, &host_mode) && host_mode == 3;
+	const bool freed = Libs::LibKernel::Memory::FreeGuestMemory(base, page * 2);
+	guest_mode = 8;
+	const bool query_rejected_after_free = !SampleGuestEndpoints(base, page, &guest_mode);
+	const auto reused = Libs::LibKernel::Memory::AllocateProgramMemory(
+	    base, page, Common::VirtualMemory::Mode::ReadWrite, "memory_receipt_reuse_fixture");
+	guest_mode = 8;
+	const bool reuse_query = reused != 0 &&
+	                         SampleGuestEndpoints(reused, page, &guest_mode) && guest_mode == 3;
+	const bool reuse_freed = reused != 0 &&
+	                         Libs::LibKernel::Memory::FreeGuestMemory(reused, page);
+	return initially_mapped && split_guest_protection && host_mode_is_independent &&
+	       freed && query_rejected_after_free && reuse_query && reuse_freed;
+}
+#endif
+#endif // KYTY_DIAGNOSTIC_RUNTIME
+
 static uint64_t CalcBaseSize(const Elf64_Ehdr* ehdr, const Elf64_Phdr* phdr) {
 	uint64_t base_size = 0;
 	for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
@@ -1700,6 +1846,9 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 	    g_desired_base_addr, program->mapped_size, Common::VirtualMemory::Mode::ExecuteReadWrite,
 	    Common::PathToString(program->file_name.filename()).c_str());
 	EXIT_IF(program->base_vaddr == 0);
+#if KYTY_DIAGNOSTIC_RUNTIME
+	EmitMemoryAllocated(program);
+#endif
 
 	if (patch_guest_instructions) {
 		const auto trampoline_addr           = program->base_vaddr + program->base_size_aligned;
@@ -1757,7 +1906,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 				executable_segments.emplace_back(segment_addr, segment_file_size);
 			}
 
-			if (!skip_protect) {
+		if (!skip_protect) {
 				Libs::LibKernel::Memory::SetProgramMemoryProtection(segment_addr,
 				                                                    segment_memory_size, mode);
 
@@ -1765,6 +1914,9 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 					Common::VirtualMemory::FlushInstructionCache(segment_addr, segment_memory_size);
 				}
 			}
+#if KYTY_DIAGNOSTIC_RUNTIME
+			EmitMemorySegment(program, i, segment_addr, segment_memory_size, mode, skip_protect);
+#endif
 		}
 
 		if (phdr[i].p_type == PT_TLS) {
@@ -1883,8 +2035,12 @@ void RuntimeLinker::DeleteProgram(Program* p) {
 		if (program->instruction_trampoline_size != 0) {
 			UnregisterGuestInstructionPatchModule(reinterpret_cast<void*>(program->base_vaddr));
 		}
-		EXIT_IF(
-		    !Libs::LibKernel::Memory::FreeGuestMemory(program->base_vaddr, program->mapped_size));
+		const bool released = Libs::LibKernel::Memory::FreeGuestMemory(
+		    program->base_vaddr, program->mapped_size);
+		EXIT_IF(!released);
+#if KYTY_DIAGNOSTIC_RUNTIME
+		EmitMemoryFreed(program->unique_id);
+#endif
 	}
 }
 

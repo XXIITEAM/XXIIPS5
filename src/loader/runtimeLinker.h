@@ -206,6 +206,9 @@ private:
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 bool TestMainEntryUsesGuestStack();
 bool TestModuleRelocationUsesWritableHostMapping();
+#if KYTY_DIAGNOSTIC_RUNTIME
+bool TestRuntimeMemoryMapEndpointSampling();
+#endif
 #endif
 
 } // namespace Loader
