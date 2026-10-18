@@ -66,6 +66,16 @@ inline void SanitizeSymbolName(const char* raw, char* out, size_t size) {
 	out[n] = '\0';
 }
 
+// PSVXXII J1c: one host call-stack frame as a sanitized module base name and a
+// module-relative return address; no absolute address or path.
+inline constexpr unsigned kMaxStackFrames = 20;
+inline int FormatStackFrame(char* out, size_t size, unsigned index, const char* module, uint64_t offset) {
+	return std::snprintf(out, size, "XXII_STACK_V1 frame=%u module=%s offset=0x%" PRIx64 "\n", index, module, offset);
+}
+// Up to kMaxStackFrames frames of the calling thread (Windows), stopping at the
+// first address outside every host module: guest code has no unwind data.
+void ReportHostStack();
+
 // PSVXXII J2: bounded context lines (for example the unresolved-import ledger)
 // printed once, before the first receipt or fatal-exit marker.
 using CrashContextReporter = void (*)();
@@ -78,6 +88,7 @@ inline void ReportCrashContext() {
 	static std::atomic_bool reported {false};
 	if (!CrashReceiptsEnabled() || reported.exchange(true)) return;
 	if (auto reporter = CrashContextReporterSlot().load(); reporter != nullptr) reporter();
+	ReportHostStack();
 }
 
 // The first receipt wins: later fatal paths (EXIT, abort) never repeat it.

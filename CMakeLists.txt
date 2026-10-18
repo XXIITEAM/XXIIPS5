@@ -760,13 +760,22 @@ if(BUILD_TESTING)
 	if(KYTY_DIAGNOSTIC_RUNTIME)
 		foreach(crash_mode abort terminate)
 			add_test(NAME crash_receipt_${crash_mode} COMMAND $<TARGET_FILE:crash_receipt_tests> --crash=${crash_mode})
+			set(crash_receipt_pattern "XXII_CRASH_V1 class=${crash_mode} code=0x00000000 access=none module=unknown offset=0x0")
+			if(WIN32)
+				# J1c: the host stack of the failing thread precedes the receipt.
+				set(crash_receipt_pattern "XXII_STACK_V1 frame=0 module=crash_receipt_tests\\.exe offset=0x[0-9a-f]+.*${crash_receipt_pattern}")
+			endif()
 			set_tests_properties(crash_receipt_${crash_mode} PROPERTIES ENVIRONMENT "XXII_COMPAT_PROBE=1" TIMEOUT 30
-				PASS_REGULAR_EXPRESSION "XXII_CRASH_V1 class=${crash_mode} code=0x00000000 access=none module=unknown offset=0x0")
+				PASS_REGULAR_EXPRESSION "${crash_receipt_pattern}")
 		endforeach()
 		if(WIN32)
 			add_test(NAME crash_receipt_unhandled COMMAND $<TARGET_FILE:crash_receipt_tests> --crash=unhandled)
 			set_tests_properties(crash_receipt_unhandled PROPERTIES ENVIRONMENT "XXII_COMPAT_PROBE=1" TIMEOUT 30
 				PASS_REGULAR_EXPRESSION "XXII_CRASH_V1 class=unhandled_exception code=0xE0001234 access=none module=[A-Za-z0-9_.-]+ offset=0x[0-9a-f]+")
+			# J1c: assertion captures its host caller before reporting the fatal exit.
+			add_test(NAME crash_receipt_assert_stack COMMAND $<TARGET_FILE:crash_receipt_tests> --crash=assert)
+			set_tests_properties(crash_receipt_assert_stack PROPERTIES ENVIRONMENT "XXII_COMPAT_PROBE=1" TIMEOUT 30
+				PASS_REGULAR_EXPRESSION "XXII_STACK_V1 frame=0 module=crash_receipt_tests\\.exe offset=0x[0-9a-f]+.*XXII_FATAL_EXIT_V1 code=321 kind=assert_condition source=CrashReceiptTests line=[0-9]+")
 		endif()
 	endif()
 	add_test(NAME avplayer_file COMMAND $<TARGET_FILE:avplayer_file_tests>)

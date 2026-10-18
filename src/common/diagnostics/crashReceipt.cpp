@@ -62,6 +62,21 @@ bool HostModuleOf(uint64_t address, char* name, size_t size, uint64_t* offset) {
 #endif
 }
 
+void ReportHostStack() {
+#if defined(_WIN32)
+	void*        frames[kMaxStackFrames] {};
+	const USHORT count = RtlCaptureStackBackTrace(1, kMaxStackFrames, frames, nullptr);
+	char         line[160];
+	for (USHORT i = 0; i < count; ++i) {
+		char     module[49];
+		uint64_t offset = 0;
+		if (!HostModuleOf(reinterpret_cast<uint64_t>(frames[i]), module, sizeof(module), &offset)) break;
+		if (FormatStackFrame(line, sizeof(line), i, module, offset) > 0) std::fputs(line, stderr);
+	}
+	std::fflush(stderr);
+#endif
+}
+
 void InstallCrashReceipts() {
 	static std::atomic_bool installed {false};
 	if (!CrashReceiptsEnabled() || installed.exchange(true)) return;

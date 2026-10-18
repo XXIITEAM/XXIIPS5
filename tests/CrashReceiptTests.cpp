@@ -1,5 +1,6 @@
 // PSVXXII J1a: XXII_CRASH_V1 formatting, sanitization and fatal-path emission.
 #include "common/diagnostics/crashReceipt.h"
+#include "common/assert.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -20,6 +21,10 @@ void Check(bool ok, const char* what) {
 	}
 }
 void Probe() {}
+#if defined(_WIN32)
+// Unlike abort/terminate, this exercises the exact EXIT_IF diagnostic path.
+__declspec(noinline) void TriggerAssertFixture() { EXIT_IF(true); }
+#endif
 } // namespace
 
 int main(int argc, char** argv) {
@@ -32,6 +37,9 @@ int main(int argc, char** argv) {
 		const char* mode = argv[1] + 8;
 		if (std::strcmp(mode, "abort") == 0) std::abort();
 		if (std::strcmp(mode, "terminate") == 0) std::terminate();
+#if defined(_WIN32)
+        if (std::strcmp(mode, "assert") == 0) TriggerAssertFixture();
+#endif
 #if defined(_WIN32)
 		if (std::strcmp(mode, "unhandled") == 0) RaiseException(0xE0001234u, EXCEPTION_NONCONTINUABLE, 0, nullptr);
 #endif
@@ -57,6 +65,9 @@ int main(int argc, char** argv) {
 			  std::strstr(name, "crash_receipt_tests") != nullptr && offset != 0,
 		  "host module and offset of the test's own code");
 #endif
+	Check(Common::Diagnostics::FormatStackFrame(line, sizeof(line), 3, "PSVXXII.Runtime.exe", 0x1a2b) > 0 &&
+			  std::strcmp(line, "XXII_STACK_V1 frame=3 module=PSVXXII.Runtime.exe offset=0x1a2b\n") == 0,
+		  "stack frame format");
 	if (g_failures == 0) std::puts("CrashReceiptTests: all cases passed");
 	return g_failures == 0 ? 0 : 1;
 }
