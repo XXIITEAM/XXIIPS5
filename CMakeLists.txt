@@ -756,6 +756,15 @@ if(BUILD_TESTING)
 		add_test(NAME unresolved_import_ledger_report COMMAND $<TARGET_FILE:unresolved_import_ledger_tests> --report)
 		set_tests_properties(unresolved_import_ledger_report PROPERTIES TIMEOUT 60
 			PASS_REGULAR_EXPRESSION "XXII_UNRESOLVED_V1 symbol=AbCdEfGhIjK#A#B program=eboot.bin calls=3 caller=unknown offset=0x0")
+		if(KYTY_DIAGNOSTIC_RUNTIME)
+			# P0: prove guest first-call module+offset marker survives WITHOUT
+			# a fatal exit or the opt-in terminal --report path.
+			add_test(NAME unresolved_import_ledger_first_call
+				COMMAND $<TARGET_FILE:unresolved_import_ledger_tests>)
+			set_tests_properties(unresolved_import_ledger_first_call PROPERTIES
+				TIMEOUT 30 ENVIRONMENT "XXII_COMPAT_HLE_TRIAGE=1"
+				PASS_REGULAR_EXPRESSION "XXII_UNRESOLVED_V1 symbol=AbCdEfGhIjK#A#B program=eboot.bin calls=1 caller=unknown offset=0x0")
+		endif()
 	endif()
 	if(KYTY_DIAGNOSTIC_RUNTIME)
 		foreach(crash_mode abort terminate)

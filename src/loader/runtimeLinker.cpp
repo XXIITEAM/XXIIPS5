@@ -201,6 +201,32 @@ static uint64_t RegisterStubbedImport(uint32_t index, const Program* program,
 	return thunk;
 }
 
+#if KYTY_DIAGNOSTIC_RUNTIME
+// First-call breadcrumb: emit the ALREADY recorded guest return site before
+// any watchdog can terminate the guest and lose the fatal-only J2 summary.
+// Runs once per unresolved import, only for an explicitly armed Developer
+// session; never logs a raw address, path, import bytes or guest memory.
+static void ReportFirstUnresolvedCall(uint64_t record_id, uint64_t guest_return) {
+    if (!Common::HleTrace::Enabled() || record_id >= g_stubbed_imports.size())
+        return;
+    const auto& record = g_stubbed_imports[record_id];
+    char symbol[65], program[49], caller[49] = "unknown";
+    Common::Diagnostics::SanitizeSymbolName(record.name.c_str(), symbol, sizeof(symbol));
+    Common::Diagnostics::SanitizeModuleName(record.program.c_str(), program, sizeof(program));
+    uint64_t offset = 0;
+    if (auto* linker = Common::Singleton<RuntimeLinker>::Instance(); linker != nullptr) {
+        if (const auto* p = linker->TryFindProgramByAddr(guest_return); p != nullptr) {
+            Common::Diagnostics::SanitizeModuleName(
+                p->file_name.filename().string().c_str(), caller, sizeof(caller));
+            offset = guest_return - p->base_vaddr;
+        }
+    }
+    std::fprintf(stderr, "XXII_UNRESOLVED_V1 symbol=%s program=%s calls=1 caller=%s offset=0x%" PRIx64 "\n",
+                 symbol, program, caller, offset);
+    std::fflush(stderr);
+}
+#endif
+
 static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id, uint64_t guest_return) {
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::UnresolvedImportCalls);
 	bool first_call = false;
@@ -209,6 +235,9 @@ static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id, uint64_t 
 		first_call  = entry.calls.fetch_add(1, std::memory_order_relaxed) == 0;
 		if (first_call) entry.first_caller.store(guest_return, std::memory_order_relaxed);
 	}
+#if KYTY_DIAGNOSTIC_RUNTIME
+	if (first_call) ReportFirstUnresolvedCall(record_id, guest_return);
+#endif
 	const auto log_index = g_unresolved_stub_call_log_count.fetch_add(1);
 	if (log_index < 1024 || first_call) {
 		if (record_id < g_stubbed_imports.size()) {
