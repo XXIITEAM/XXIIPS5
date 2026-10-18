@@ -1136,66 +1136,81 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 				                      static_cast<uint32_t>(texture.layout));
 #endif
 #if KYTY_DIAGNOSTIC_RUNTIME
-            // Opt-in, diagnostic-only: report the *actual* cached image view
-            // used by any observed depth-comparison descriptor, not just
-            // native binding 24. Never record Vulkan handles or game content.
+            // Developer-only depth-view diagnostics must never dereference a
+            // retired image or update its LRU lifetime while observing it.
             const char* depth_probe = std::getenv("XXII_COMPAT_PROBE");
-            if (i < 8 && resource.depth_compare && resource.mip_count != 0 &&
-                depth_probe && depth_probe[0] == '1' && depth_probe[1] == '\0') {
-                const auto& cached = m_context.GetTextureCache().GetImage(texture.image_id);
-                const auto vk_view = m_descriptor_images[start].imageView;
-                const auto view_it = std::ranges::find(
-                    cached.views, vk_view, &CachedImageView::view);
-                const auto actual_format = view_it == cached.views.end()
-                    ? vk::Format::eUndefined : view_it->info.format;
-                const auto actual_aspect = view_it == cached.views.end()
-                    ? 0u : static_cast<uint32_t>(view_it->info.aspect);
-                const uint64_t actual = (uint64_t {static_cast<uint32_t>(actual_format)} << 32u) |
-                                        actual_aspect;
-                const uint64_t requested = (
-                    uint64_t {static_cast<uint32_t>(texture.desc.view_info.format)} << 32u) |
-                    ShaderRecompiler::IR::NativeBinding(program.stage, kind);
-                buffer.RecordGpuTrace(GpuTrace::Kind::DepthCompareView,
-                                      texture.image_id.index, texture.image_id.generation,
-                                      static_cast<uint32_t>(program.stage),
-                                      actual, requested);
-            }
-#endif
-            // Binding 24 in a compute pipeline is a floating depth-compare
-            // sampled 2D texture. Vulkan VUID-06479 reports R32_SFLOAT
-            // there; retain bounded format metadata of the *actual* image
-            // view, not just the expected guest descriptor format.
-            static const bool probe = std::getenv("XXII_COMPAT_PROBE") != nullptr;
-            if (probe && resource.depth_compare &&
-                ShaderRecompiler::IR::NativeBinding(program.stage, kind) == 24u &&
-                resource.descriptor_index == 0 && resource.mip_count != 0) {
-                const auto& cached = m_context.GetTextureCache().GetImage(texture.image_id);
-                const auto vk_view = m_descriptor_images[start].imageView;
-                const auto it = std::ranges::find(cached.views, vk_view, &CachedImageView::view);
-                const auto view_format = it == cached.views.end() ? vk::Format::eUndefined
-                                                                   : it->info.format;
-                const bool invalid = !cached.info.IsDepth() ||
-                                     view_format == vk::Format::eR32Sfloat;
-                static std::atomic<uint32_t> bad_count {0};
-                static std::atomic<uint32_t> ok_count {0};
-                const auto sequence = (invalid ? bad_count : ok_count)
-                                          .fetch_add(1, std::memory_order_relaxed);
-                if (sequence < (invalid ? 20u : 4u)) {
-                    std::fprintf(stderr,
-                        "XXII_DEPTH_BINDING_DIAG stage=%u binding=24 index=%u bad=%d"
-                        " compare=%d guest_format=%u requested=%d requested_view=%d"
-                        " cached_format=%d backing_format=%d actual_view=%d null=%d\n",
-                        static_cast<uint32_t>(program.stage), resource.descriptor_index,
-                        invalid ? 1 : 0, resource.depth_compare ? 1 : 0,
-                        static_cast<uint32_t>(texture.desc.info.guest_format),
-                        static_cast<int>(texture.desc.info.pixel_format),
-                        static_cast<int>(texture.desc.view_info.format),
-                        static_cast<int>(cached.info.pixel_format),
-                        static_cast<int>(cached.backing.format), static_cast<int>(view_format),
-                        cached.info.data.Empty() ? 1 : 0);
-                    std::fflush(stderr);
+            if (depth_probe != nullptr && depth_probe[0] == '1' &&
+                depth_probe[1] == '\0' && resource.depth_compare && resource.mip_count != 0) {
+                const auto binding = ShaderRecompiler::IR::NativeBinding(program.stage, kind);
+                const bool watched_binding = binding == 24u && resource.descriptor_index == 0;
+                if (i < 8 || watched_binding) {
+                    const auto* cached = m_context.GetTextureCache().m_slot_images.try_get(texture.image_id);
+                    if (cached == nullptr) {
+                        // Observational uncertainty, not a second fatal error.
+                        // No guest addresses, image IDs, or host pointers.
+                        static std::atomic<uint32_t> missing_count {0};
+                        if (missing_count.fetch_add(1, std::memory_order_relaxed) < 16u) {
+                            std::fprintf(stderr,
+                                         "XXII_DEPTH_CACHE_MISSING_V1 stage=%u binding=%u\n",
+                                         static_cast<uint32_t>(program.stage), binding);
+                            std::fflush(stderr);
+                        }
+                    }
+
+                    if (i < 8) {
+                        vk::Format actual_format = vk::Format::eUndefined;
+                        uint32_t actual_aspect = 0;
+                        if (cached != nullptr) {
+                            const auto vk_view = m_descriptor_images[start].imageView;
+                            const auto view_it = std::ranges::find(cached->views, vk_view, &CachedImageView::view);
+                            if (view_it != cached->views.end()) {
+                                actual_format = view_it->info.format;
+                                actual_aspect = static_cast<uint32_t>(view_it->info.aspect);
+                            }
+                        }
+                        const uint64_t actual = (uint64_t {static_cast<uint32_t>(actual_format)} << 32u) |
+                                                actual_aspect;
+                        const uint64_t requested = (
+                            uint64_t {static_cast<uint32_t>(texture.desc.view_info.format)} << 32u) |
+                            binding;
+                        buffer.RecordGpuTrace(GpuTrace::Kind::DepthCompareView,
+                                              texture.image_id.index, texture.image_id.generation,
+                                              static_cast<uint32_t>(program.stage),
+                                              actual, requested);
+                    }
+
+                    // Preserve the existing binding-24 diagnostic for a live
+                    // image only. A missing image is already reported above.
+                    if (watched_binding && cached != nullptr) {
+                        const auto vk_view = m_descriptor_images[start].imageView;
+                        const auto it = std::ranges::find(cached->views, vk_view, &CachedImageView::view);
+                        const auto view_format = it == cached->views.end() ? vk::Format::eUndefined
+                                                                           : it->info.format;
+                        const bool invalid = !cached->info.IsDepth() ||
+                                             view_format == vk::Format::eR32Sfloat;
+                        static std::atomic<uint32_t> bad_count {0};
+                        static std::atomic<uint32_t> ok_count {0};
+                        const auto sequence = (invalid ? bad_count : ok_count)
+                                                  .fetch_add(1, std::memory_order_relaxed);
+                        if (sequence < (invalid ? 20u : 4u)) {
+                            std::fprintf(stderr,
+                                "XXII_DEPTH_BINDING_DIAG stage=%u binding=24 index=%u bad=%d"
+                                " compare=%d guest_format=%u requested=%d requested_view=%d"
+                                " cached_format=%d backing_format=%d actual_view=%d null=%d\n",
+                                static_cast<uint32_t>(program.stage), resource.descriptor_index,
+                                invalid ? 1 : 0, resource.depth_compare ? 1 : 0,
+                                static_cast<uint32_t>(texture.desc.info.guest_format),
+                                static_cast<int>(texture.desc.info.pixel_format),
+                                static_cast<int>(texture.desc.view_info.format),
+                                static_cast<int>(cached->info.pixel_format),
+                                static_cast<int>(cached->backing.format), static_cast<int>(view_format),
+                                cached->info.data.Empty() ? 1 : 0);
+                            std::fflush(stderr);
+                        }
+                    }
                 }
             }
+#endif
 		}
 
 		const auto shader_data_dwords = program.bindings.ShaderDataDwords();

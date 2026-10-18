@@ -639,7 +639,7 @@ add_executable(gpu_resource_lifetime_tests EXCLUDE_FROM_ALL
     "${KYTY_TESTS_DIR}/GpuResourceLifetimeTests.cpp"
 )
 target_include_directories(gpu_resource_lifetime_tests PRIVATE ${inc_headers})
-target_link_libraries(gpu_resource_lifetime_tests PRIVATE Vulkan::Headers)
+target_link_libraries(gpu_resource_lifetime_tests PRIVATE Vulkan::Headers common)
 
 add_executable(gpu_index_bounds_tests EXCLUDE_FROM_ALL
     "${KYTY_TESTS_DIR}/GpuIndexBoundsTests.cpp"

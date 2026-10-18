@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/gpuResourceLifetime.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
+#include "common/slotVector.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,29 @@ void Require(bool condition, const char* message) {
     }
 }
 int main() {
+    // The diagnostic observer must not turn a retired image handle into a
+    // second guest crash. It must distinguish a reused slot generation too.
+    Common::SlotVector<uint32_t> imageSlots;
+    const auto retiredId = imageSlots.insert(42u);
+    Require(imageSlots.try_get(retiredId) != nullptr &&
+            *imageSlots.try_get(retiredId) == 42u, "active image slot readable");
+    imageSlots.erase(retiredId);
+    Require(!imageSlots.is_allocated(retiredId) &&
+            imageSlots.try_get(retiredId) == nullptr,
+            "retired image read is non-fatal");
+    const auto reusedId = imageSlots.insert(43u);
+    Require(reusedId.index == retiredId.index &&
+            reusedId.generation != retiredId.generation,
+            "retired image generation incremented");
+    Require(imageSlots.try_get(retiredId) == nullptr &&
+            imageSlots.try_get(reusedId) != nullptr &&
+            *imageSlots.try_get(reusedId) == 43u,
+            "stale image cannot alias replacement");
+    const auto& constImageSlots = imageSlots;
+    Require(constImageSlots.try_get(retiredId) == nullptr &&
+            constImageSlots.try_get(Common::SlotId {}) == nullptr,
+            "const lookup and unallocated id fail closed");
+
     ResourceLifetimeHistory trace;
     Require(trace.Count() == 0 && trace.Total() == 0, "initial empty");
     const ResourceEvent created {ResourceAction::Created, 100, 98, 0, 4096, 5, 1, 126, 1};
