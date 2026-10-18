@@ -116,6 +116,10 @@ int KYTY_SYSV_ABI NetPoolDestroy(int memid) {
 	return FinishNetCall(Net::NetPoolDestroy(memid));
 }
 
+int KYTY_SYSV_ABI NetGetMemoryPoolStats(int memid, Network::NetMemoryPoolStats* stats) {
+	return FinishNetCall(Net::NetGetMemoryPoolStats(memid, stats));
+}
+
 int KYTY_SYSV_ABI NetResolverCreate(const char* name, int memid, int flags) {
 	return FinishNetCall(Net::NetResolverCreate(name, memid, flags));
 }
@@ -235,6 +239,7 @@ LIB_DEFINE(InitNet_1_Net) {
 	LIB_FUNC("OXXX4mUk3uk", LibNet::NetConnect);
 	LIB_FUNC("dgJBaeJnGpo", LibNet::NetPoolCreate);
 	LIB_FUNC("K7RlrTkI-mw", LibNet::NetPoolDestroy);
+	LIB_FUNC("rMyh97BU5pY", LibNet::NetGetMemoryPoolStats);
 	LIB_FUNC("C4UgDHHPvdw", LibNet::NetResolverCreate);
 	LIB_FUNC("kJlYH5uMAWI", LibNet::NetResolverDestroy);
 	LIB_FUNC("AzqoBha7js4", LibNet::NetResolverAbort);
@@ -276,6 +281,7 @@ namespace Ssl = Network::Ssl;
 LIB_DEFINE(InitNet_1_Ssl) {
 	LIB_FUNC("hdpVEUDFW3s", Ssl::SslInit);
 	LIB_FUNC("0K1yQ6Lv-Yc", Ssl::SslTerm);
+	LIB_FUNC("-PoIzr3PEk0", Ssl::SslGetMemoryPoolStats);
 	LIB_FUNC("TDfQqO-gMbY", Ssl::SslGetCaCerts);
 	LIB_FUNC("qIvLs0gYxi0", Ssl::SslFreeCaCerts);
 }
@@ -816,6 +822,7 @@ static int g_http2_next_template_id = 1;
 static int g_http2_next_request_id  = 1;
 
 static std::map<int, Http2Context>  g_http2_contexts;
+static std::mutex                   g_http2_context_mutex;
 static std::map<int, Http2Template> g_http2_templates;
 static std::map<int, Http2Request>  g_http2_requests;
 
@@ -843,10 +850,26 @@ static int KYTY_SYSV_ABI Http2Init(int libnet_mem_id, int libssl_ctx_id, size_t 
 	     "\t max_concurrent_request = %d\n",
 	     libnet_mem_id, libssl_ctx_id, pool_size, max_concurrent_request);
 
+	std::scoped_lock lock(g_http2_context_mutex);
 	const auto id        = g_http2_next_context_id++;
 	g_http2_contexts[id] = {libnet_mem_id, libssl_ctx_id, pool_size, max_concurrent_request};
 
 	return id;
+}
+
+static int KYTY_SYSV_ABI Http2GetMemoryPoolStats(int lib_http2_ctx_id,
+                                                   Network::MemoryPoolStats* stats) {
+	PRINT_NAME();
+	if (stats == nullptr) return HTTP2_ERROR_NULL_POINTER;
+
+	std::scoped_lock lock(g_http2_context_mutex);
+	const auto found = g_http2_contexts.find(lib_http2_ctx_id);
+	if (found == g_http2_contexts.end()) {
+		std::memset(stats, 0, sizeof(*stats));
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	*stats = {static_cast<uint64_t>(found->second.pool_size), 0, 0, 0};
+	return 0;
 }
 
 static int KYTY_SYSV_ABI Http2CreateTemplate(int lib_http2_ctx_id, const char* user_agent,
@@ -858,6 +881,7 @@ static int KYTY_SYSV_ABI Http2CreateTemplate(int lib_http2_ctx_id, const char* u
 	LOGF("\t http_ver           = %d\n", http_ver);
 	LOGF("\t is_auto_proxy_conf = %d\n", is_auto_proxy_conf);
 
+	std::scoped_lock lock(g_http2_context_mutex);
 	if (g_http2_contexts.find(lib_http2_ctx_id) == g_http2_contexts.end()) {
 		return HTTP2_ERROR_INVALID_ID;
 	}
@@ -897,6 +921,7 @@ static int KYTY_SYSV_ABI Http2Term(int lib_http2_ctx_id) {
 
 	LOGF("\t lib_http2_ctx_id = %d\n", lib_http2_ctx_id);
 
+	std::scoped_lock lock(g_http2_context_mutex);
 	auto context = g_http2_contexts.find(lib_http2_ctx_id);
 	if (context == g_http2_contexts.end()) {
 		return HTTP2_ERROR_INVALID_ID;
@@ -1444,6 +1469,7 @@ static int KYTY_SYSV_ABI Http2DeleteRequest(int req_id) {
 LIB_DEFINE(InitNet_1_Http2) {
 	LIB_FUNC("3JCe3lCbQ8A", LibHttp2::Http2Init);
 	LIB_FUNC("YiBUtz-pGkc", LibHttp2::Http2Term);
+	LIB_FUNC("otUQuZa-mv0", LibHttp2::Http2GetMemoryPoolStats);
 	LIB_FUNC("+wCt7fCijgk", LibHttp2::Http2CreateTemplate);
 	LIB_FUNC("pDom5-078DA", LibHttp2::Http2DeleteTemplate);
 	LIB_FUNC("mmyOCxQMVYQ", LibHttp2::Http2CreateRequestWithURL);

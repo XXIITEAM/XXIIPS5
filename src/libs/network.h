@@ -8,6 +8,23 @@ namespace Libs::Network {
 void Initialize();
 void Shutdown();
 
+// PS5 x86-64 ABI layouts for the network pool statistics calls.
+// Only the pool size is currently backed by Kyty state; untracked
+// in-use/peak allocation counters remain zero (partial HLE).
+struct MemoryPoolStats {
+    uint64_t pool_size = 0;
+    uint64_t max_inuse_size = 0;
+    uint64_t current_inuse_size = 0;
+    int32_t reserved = 0;
+};
+struct NetMemoryPoolStats {
+    uint64_t pool_size = 0;
+    uint64_t max_inuse_size = 0;
+    uint64_t current_inuse_size = 0;
+};
+static_assert(sizeof(MemoryPoolStats) == 32);
+static_assert(sizeof(NetMemoryPoolStats) == 24);
+
 struct Lifecycle {
 	static constexpr const char* name       = "Network";
 	static constexpr auto        initialize = Libs::Network::Initialize;
@@ -41,6 +58,7 @@ int KYTY_SYSV_ABI NetInit();
 int KYTY_SYSV_ABI NetTerm();
 int KYTY_SYSV_ABI NetPoolCreate(const char* name, int size, int flags);
 int KYTY_SYSV_ABI NetPoolDestroy(int memid);
+int KYTY_SYSV_ABI NetGetMemoryPoolStats(int memid, NetMemoryPoolStats* stats);
 int KYTY_SYSV_ABI NetResolverCreate(const char* name, int memid, int flags);
 int KYTY_SYSV_ABI NetResolverDestroy(int rid);
 int KYTY_SYSV_ABI NetResolverAbort(int rid, int flags);
@@ -81,6 +99,7 @@ namespace Ssl {
 
 int KYTY_SYSV_ABI SslInit(uint64_t pool_size);
 int KYTY_SYSV_ABI SslTerm(int ssl_ctx_id);
+int KYTY_SYSV_ABI SslGetMemoryPoolStats(int ssl_ctx_id, MemoryPoolStats* stats);
 int KYTY_SYSV_ABI SslGetCaCerts(int ssl_ctx_id, void* ca_certs);
 int KYTY_SYSV_ABI SslFreeCaCerts(int ssl_ctx_id, void* ca_certs);
 

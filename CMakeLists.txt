@@ -455,6 +455,11 @@ add_executable(trophy_system_tests EXCLUDE_FROM_ALL
 target_link_libraries(trophy_system_tests common)
 target_include_directories(trophy_system_tests PRIVATE ${inc_headers})
 
+# P0: PS5-measured network memory pool stat ABI and real per-library NID resolution.
+# Test uses synthetic handles only; no guest binary, private game data or network I/O.
+add_kyty_full_emulator_test(network_memory_pool_stats_tests
+    "${KYTY_TESTS_DIR}/NetworkMemoryPoolStatsTests.cpp")
+
 # PSVXXII J1a: XXII_CRASH_V1 receipt formatting and fatal-path emission.
 add_executable(crash_receipt_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CrashReceiptTests.cpp")
 target_link_libraries(crash_receipt_tests common)
@@ -751,6 +756,8 @@ if(BUILD_TESTING)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
 	add_test(NAME crash_receipt COMMAND $<TARGET_FILE:crash_receipt_tests>)
+	add_test(NAME network_memory_pool_stats COMMAND $<TARGET_FILE:network_memory_pool_stats_tests>)
+	set_tests_properties(network_memory_pool_stats PROPERTIES TIMEOUT 30)
 	if(TARGET unresolved_import_ledger_tests)
 		add_test(NAME unresolved_import_ledger COMMAND $<TARGET_FILE:unresolved_import_ledger_tests>)
 		add_test(NAME unresolved_import_ledger_report COMMAND $<TARGET_FILE:unresolved_import_ledger_tests> --report)
@@ -927,6 +934,7 @@ if(BUILD_TESTING)
 if(TARGET unresolved_import_ledger_tests)
 	add_dependencies(kyty_tests unresolved_import_ledger_tests)
 endif()
+add_dependencies(kyty_tests network_memory_pool_stats_tests)
 endif()
 
 # Test Darwin signal-context restoration for SSE4a instructions.

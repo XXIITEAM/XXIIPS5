@@ -114,6 +114,7 @@ public:
 
 	int  PoolCreate(const char* name, int size);
 	bool PoolDestroy(int memid);
+	bool PoolSize(int memid, uint64_t* size);
 	int  ResolverCreate(const char* name, int memid);
 	bool ResolverDestroy(int rid);
 	bool ResolverValid(int rid);
@@ -121,6 +122,7 @@ public:
 	Id   SslInit(uint64_t pool_size);
 	bool SslTerm(Id ssl_ctx_id);
 	bool SslValid(Id ssl_ctx_id);
+	bool SslPoolSize(Id ssl_ctx_id, uint64_t* size);
 
 	Id   HttpInit(int memid, Id ssl_ctx_id, uint64_t pool_size);
 	bool HttpTerm(Id http_ctx_id);
@@ -286,6 +288,15 @@ bool Network::PoolDestroy(int memid) {
 	return false;
 }
 
+bool Network::PoolSize(int memid, uint64_t* size) {
+	Common::LockGuard lock(m_mutex);
+	if (size == nullptr || memid < 0 || memid >= POOLS_MAX || !m_pools[memid].used) {
+		return false;
+	}
+	*size = static_cast<uint64_t>(m_pools[memid].size);
+	return true;
+}
+
 int Network::ResolverCreate(const char* name, int memid) {
 	Common::LockGuard lock(m_mutex);
 
@@ -356,6 +367,17 @@ bool Network::SslValid(Id ssl_ctx_id) {
 
 	return ssl_ctx_id.GetType() == Id::Type::Ssl && ssl_ctx_id.GetId() >= 0 &&
 	       ssl_ctx_id.GetId() < SSL_MAX && m_ssl[ssl_ctx_id.GetId()].used;
+}
+
+bool Network::SslPoolSize(Id ssl_ctx_id, uint64_t* size) {
+	Common::LockGuard lock(m_mutex);
+	if (size == nullptr || ssl_ctx_id.GetType() != Id::Type::Ssl ||
+	    ssl_ctx_id.GetId() < 0 || ssl_ctx_id.GetId() >= SSL_MAX ||
+	    !m_ssl[ssl_ctx_id.GetId()].used) {
+		return false;
+	}
+	*size = m_ssl[ssl_ctx_id.GetId()].size;
+	return true;
 }
 
 Network::Id Network::HttpInit(int memid, Id ssl_ctx_id, uint64_t pool_size) {
@@ -1408,6 +1430,19 @@ int KYTY_SYSV_ABI NetPoolDestroy(int memid) {
 		return NET_ERROR_EBADF;
 	}
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI NetGetMemoryPoolStats(int memid, NetMemoryPoolStats* stats) {
+	PRINT_NAME();
+	EXIT_IF(g_net == nullptr);
+
+	// Net checks the pool handle before the pointer and does NOT clear the
+	// output buffer for an unknown/destroyed pool.
+	uint64_t pool_size = 0;
+	if (!g_net->PoolSize(memid, &pool_size)) return NET_ERROR_EBADF;
+	if (stats == nullptr) return NET_ERROR_EINVAL;
+	*stats = {pool_size, 0, 0};
 	return OK;
 }
 
@@ -2718,6 +2753,21 @@ int KYTY_SYSV_ABI SslTerm(int ssl_ctx_id) {
 		return SSL_ERROR_INVALID_ID;
 	}
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI SslGetMemoryPoolStats(int ssl_ctx_id, MemoryPoolStats* stats) {
+	PRINT_NAME();
+	// Unlike other SSL APIs, this call returns INVALID_VALUE (0x8095F007)
+	// for a null output before checking the context id.
+	if (stats == nullptr) return SSL_ERROR_INVALID_VALUE;
+	EXIT_IF(g_net == nullptr);
+	uint64_t pool_size = 0;
+	if (!g_net->SslPoolSize(Network::Id(ssl_ctx_id), &pool_size)) {
+		std::memset(stats, 0, sizeof(*stats));
+		return SSL_ERROR_INVALID_ID;
+	}
+	*stats = {pool_size, 0, 0, 0};
 	return OK;
 }
 
