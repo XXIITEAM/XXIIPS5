@@ -27,6 +27,7 @@ static void ReportFatalExitSite(const char* kind, const char* file, int line) no
     std::fprintf(stderr, "\nXXII_FATAL_EXIT_V1 code=321 kind=%s source=%s line=%d\n",
                  kind, HleTrace::SourceBase(file, source), line);
     std::fflush(stderr);
+    Diagnostics::WaitForParentCrashCapture();
 #else
     (void)kind; (void)file; (void)line;
 #endif

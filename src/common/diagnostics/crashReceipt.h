@@ -91,6 +91,10 @@ inline void ReportCrashContext() {
 	ReportHostStack();
 }
 
+// J1b-2: acknowledge an opt-in parent-owned dump before the fatal runtime
+// exits; no wait when the protected event was not provided at startup.
+void WaitForParentCrashCapture() noexcept;
+
 // The first receipt wins: later fatal paths (EXIT, abort) never repeat it.
 inline void EmitCrashReceipt(const char* crash_class, uint32_t code, const char* access, const char* module,
 							 uint64_t offset) {
@@ -102,6 +106,7 @@ inline void EmitCrashReceipt(const char* crash_class, uint32_t code, const char*
 		std::fputs("\n", stderr);
 		std::fputs(line, stderr);
 		std::fflush(stderr);
+        WaitForParentCrashCapture();
 	}
 }
 

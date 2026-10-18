@@ -2,6 +2,7 @@
 
 #include <csignal>
 #include <exception>
+#include <cwchar>
 
 #if defined(_WIN32)
 #include <windows.h> // IWYU pragma: keep
@@ -13,6 +14,7 @@ std::terminate_handler g_previous_terminate = nullptr;
 
 #if defined(_WIN32)
 LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
+HANDLE g_parent_dump_ack = nullptr;
 
 LONG WINAPI UnhandledFilter(PEXCEPTION_POINTERS info) {
 	if (info != nullptr && info->ExceptionRecord != nullptr) {
@@ -77,10 +79,23 @@ void ReportHostStack() {
 #endif
 }
 
+void WaitForParentCrashCapture() noexcept {
+#if defined(_WIN32)
+    // This is a crash-only bounded wait, not an idle/session synchronization.
+    if (g_parent_dump_ack) (void)WaitForSingleObject(g_parent_dump_ack, 9000);
+#endif
+}
+
 void InstallCrashReceipts() {
 	static std::atomic_bool installed {false};
 	if (!CrashReceiptsEnabled() || installed.exchange(true)) return;
 #if defined(_WIN32)
+    wchar_t ack_name[128] {};
+    const DWORD chars = GetEnvironmentVariableW(L"XXII_CRASH_DUMP_EVENT", ack_name, 128);
+    constexpr wchar_t prefix[] = L"Local\\XXII_CrashDump_";
+    if (chars > sizeof(prefix) / sizeof(wchar_t) - 1 && chars < 128 &&
+        std::wcsncmp(ack_name, prefix, sizeof(prefix) / sizeof(wchar_t) - 1) == 0)
+        g_parent_dump_ack = OpenEventW(SYNCHRONIZE, FALSE, ack_name);
 	g_previous_filter = SetUnhandledExceptionFilter(UnhandledFilter);
 #endif
 	g_previous_terminate = std::set_terminate(OnTerminate);
