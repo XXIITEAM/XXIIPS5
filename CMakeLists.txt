@@ -455,6 +455,11 @@ add_executable(trophy_system_tests EXCLUDE_FROM_ALL
 target_link_libraries(trophy_system_tests common)
 target_include_directories(trophy_system_tests PRIVATE ${inc_headers})
 
+# PSVXXII J1a: XXII_CRASH_V1 receipt formatting and fatal-path emission.
+add_executable(crash_receipt_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CrashReceiptTests.cpp")
+target_link_libraries(crash_receipt_tests common)
+target_include_directories(crash_receipt_tests PRIVATE ${inc_headers})
+
 add_executable(avplayer_file_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AvPlayerFileTests.cpp"
 	"${KYTY_SOURCE_DIR}/loader/timer.cpp"
@@ -741,6 +746,19 @@ if(BUILD_TESTING)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
+	add_test(NAME crash_receipt COMMAND $<TARGET_FILE:crash_receipt_tests>)
+	if(KYTY_DIAGNOSTIC_RUNTIME)
+		foreach(crash_mode abort terminate)
+			add_test(NAME crash_receipt_${crash_mode} COMMAND $<TARGET_FILE:crash_receipt_tests> --crash=${crash_mode})
+			set_tests_properties(crash_receipt_${crash_mode} PROPERTIES ENVIRONMENT "XXII_COMPAT_PROBE=1" TIMEOUT 30
+				PASS_REGULAR_EXPRESSION "XXII_CRASH_V1 class=${crash_mode} code=0x00000000 access=none module=unknown offset=0x0")
+		endforeach()
+		if(WIN32)
+			add_test(NAME crash_receipt_unhandled COMMAND $<TARGET_FILE:crash_receipt_tests> --crash=unhandled)
+			set_tests_properties(crash_receipt_unhandled PROPERTIES ENVIRONMENT "XXII_COMPAT_PROBE=1" TIMEOUT 30
+				PASS_REGULAR_EXPRESSION "XXII_CRASH_V1 class=unhandled_exception code=0xE0001234 access=none module=[A-Za-z0-9_.-]+ offset=0x[0-9a-f]+")
+		endif()
+	endif()
 	add_test(NAME avplayer_file COMMAND $<TARGET_FILE:avplayer_file_tests>)
 	add_test(NAME vdecsw COMMAND $<TARGET_FILE:vdecsw_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
@@ -853,6 +871,7 @@ if(BUILD_TESTING)
 		page_manager_tests
 		archive_file_tests
 		trophy_system_tests
+		crash_receipt_tests
 		avplayer_file_tests
 		vdecsw_tests
 		bit_array_tests

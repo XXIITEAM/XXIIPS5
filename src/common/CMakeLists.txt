@@ -2,6 +2,7 @@ file(GLOB common_src CONFIGURE_DEPENDS
 	"*.cpp"
 	"logging/*.cpp"
 	"platform/*.cpp"
+	"diagnostics/*.cpp"
 )
 
 file(GLOB_RECURSE common_headers CONFIGURE_DEPENDS "*.h")

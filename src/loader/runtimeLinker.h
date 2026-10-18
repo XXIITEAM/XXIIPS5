@@ -175,6 +175,7 @@ public:
 
 	static uint64_t ReadFromElf(Program* program, uint64_t vaddr);
 	Program*        FindProgramByAddr(uint64_t vaddr);
+	const Program*  TryFindProgramByAddr(uint64_t vaddr) noexcept; // fatal path: never blocks or exits
 	Program*        FindProgramById(int32_t id);
 	Program*        FindProgramByFileName(const std::filesystem::path& elf_name);
 

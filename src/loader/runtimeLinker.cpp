@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/diagnostics/hleTrace.h"
+#include "common/diagnostics/crashReceipt.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
@@ -712,6 +713,32 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		}
 		std::fflush(stdout);
 	}
+#if KYTY_DIAGNOSTIC_RUNTIME
+	{
+		// PSVXXII J1a: bounded fault receipt before the generic fatal exit.
+		const char* access = "none";
+		if (info->type == Common::HostException::ExceptionType::AccessViolation) {
+			switch (info->access_violation_type) {
+				case Common::HostException::AccessViolationType::Read: access = "read"; break;
+				case Common::HostException::AccessViolationType::Write: access = "write"; break;
+				case Common::HostException::AccessViolationType::Execute: access = "execute"; break;
+				default: access = "unknown"; break;
+			}
+		}
+		char        module[49]  = "unknown";
+		uint64_t    offset      = 0;
+		const char* crash_class = "host_fault";
+		if (const auto* program = Common::Singleton<RuntimeLinker>::Instance()->TryFindProgramByAddr(info->exception_address);
+		    program != nullptr) {
+			crash_class = "guest_fault";
+			Common::Diagnostics::SanitizeModuleName(program->file_name.filename().string().c_str(), module, sizeof(module));
+			offset = info->exception_address - program->base_vaddr;
+		} else if (!Common::Diagnostics::HostModuleOf(info->exception_address, module, sizeof(module), &offset)) {
+			crash_class = "unknown_fault";
+		}
+		Common::Diagnostics::EmitCrashReceipt(crash_class, static_cast<uint32_t>(info->native_code), access, module, offset);
+	}
+#endif
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
 	     " access=%u address=0x%016" PRIx64 "\n",
 	     static_cast<unsigned>(info->type), info->native_code, info->exception_address,
@@ -1505,6 +1532,23 @@ Program* RuntimeLinker::FindProgramByFileName(const std::filesystem::path& elf_n
 	return nullptr;
 }
 
+// PSVXXII J1a fatal-path variant: never blocks on the linker mutex and never EXITs.
+const Program* RuntimeLinker::TryFindProgramByAddr(uint64_t vaddr) noexcept {
+	if (!m_mutex.TryLock()) {
+		return nullptr;
+	}
+	const Program* found = nullptr;
+	for (const auto* program: m_programs) {
+		if (program != nullptr && program->base_size != 0 && vaddr >= program->base_vaddr &&
+		    vaddr - program->base_vaddr < program->base_size) {
+			found = program;
+			break;
+		}
+	}
+	m_mutex.Unlock();
+	return found;
+}
+
 Program* RuntimeLinker::FindProgramByAddr(uint64_t vaddr) {
 	Common::LockGuard lock(m_mutex);
 
@@ -2025,6 +2069,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 	if (!Common::HostException::InstallHandler(KytyExceptionHandler)) {
 		EXIT("Failed to install the required vectored exception handler\n");
 	}
+	Common::Diagnostics::InstallCrashReceipts();
 
 	std::vector<std::pair<uint64_t, uint64_t>> executable_segments;
 	uint64_t                                   eh_frame_header_addr = 0;
