@@ -204,6 +204,13 @@ private:
 	application_heap_posix_memalign_func_t m_application_heap_posix_memalign = nullptr;
 };
 
+#if KYTY_DIAGNOSTIC_RUNTIME
+// PSVXXII J2 test hooks: synthetic stubbed import, its ledger and the bounded report.
+uint64_t RegisterUnresolvedImportForTest(const std::string& name, const std::string& program);
+bool     UnresolvedImportLedgerForTest(uint64_t thunk, uint64_t* calls, uint64_t* first_caller);
+void     ReportUnresolvedImportsForTest();
+#endif
+
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 bool TestMainEntryUsesGuestStack();
 bool TestModuleRelocationUsesWritableHostMapping();

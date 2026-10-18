@@ -49,11 +49,43 @@ inline bool CrashReceiptsEnabled() {
 #endif
 }
 
+// Symbol names keep their NID alphabet ([A-Za-z0-9_+#.-]); anything else becomes '_'.
+inline void SanitizeSymbolName(const char* raw, char* out, size_t size) {
+	if (out == nullptr || size == 0) return;
+	size_t n = 0;
+	for (const char* p = raw; p != nullptr && *p != '\0' && n + 1 < size; ++p) {
+		const char c    = *p;
+		const bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+		                  c == '_' || c == '+' || c == '#' || c == '.' || c == '-';
+		out[n++] = safe ? c : '_';
+	}
+	if (n == 0) {
+		std::snprintf(out, size, "unknown");
+		return;
+	}
+	out[n] = '\0';
+}
+
+// PSVXXII J2: bounded context lines (for example the unresolved-import ledger)
+// printed once, before the first receipt or fatal-exit marker.
+using CrashContextReporter = void (*)();
+inline std::atomic<CrashContextReporter>& CrashContextReporterSlot() {
+	static std::atomic<CrashContextReporter> slot {nullptr};
+	return slot;
+}
+inline void SetCrashContextReporter(CrashContextReporter reporter) { CrashContextReporterSlot().store(reporter); }
+inline void ReportCrashContext() {
+	static std::atomic_bool reported {false};
+	if (!CrashReceiptsEnabled() || reported.exchange(true)) return;
+	if (auto reporter = CrashContextReporterSlot().load(); reporter != nullptr) reporter();
+}
+
 // The first receipt wins: later fatal paths (EXIT, abort) never repeat it.
 inline void EmitCrashReceipt(const char* crash_class, uint32_t code, const char* access, const char* module,
 							 uint64_t offset) {
 	static std::atomic_bool emitted {false};
 	if (!CrashReceiptsEnabled() || emitted.exchange(true)) return;
+	ReportCrashContext();
 	char line[192];
 	if (FormatCrashReceipt(line, sizeof(line), crash_class, code, access, module, offset) > 0) {
 		std::fputs("\n", stderr);

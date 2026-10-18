@@ -10,6 +10,8 @@
 #include <fmt/format.h>
 #include <string>
 
+#include "common/diagnostics/crashReceipt.h"
+
 namespace Common {
 
 // Only explicit Developer compatibility captures carry this fixed fatal
@@ -21,6 +23,7 @@ static void ReportFatalExitSite(const char* kind, const char* file, int line) no
     const char* probe = std::getenv("XXII_COMPAT_PROBE");
     if (!probe || probe[0] != '1' || probe[1] != '\0') return;
     char source[49] {};
+    Diagnostics::ReportCrashContext();
     std::fprintf(stderr, "\nXXII_FATAL_EXIT_V1 code=321 kind=%s source=%s line=%d\n",
                  kind, HleTrace::SourceBase(file, source), line);
     std::fflush(stderr);

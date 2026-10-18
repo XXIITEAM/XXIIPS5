@@ -123,12 +123,19 @@ struct StubbedImportRecord {
 };
 
 static std::vector<StubbedImportRecord> g_stubbed_imports;
+// PSVXXII J2: per-record ledger of zero-returning unresolved imports (calls and
+// first guest caller). Fixed storage: no reallocation while guest code runs.
+struct UnresolvedLedgerEntry {
+	std::atomic_uint64_t calls {0};
+	std::atomic_uint64_t first_caller {0};
+};
+static std::array<UnresolvedLedgerEntry, 4096> g_unresolved_ledger;
 static std::atomic_uint32_t             g_unresolved_stub_call_log_count {0};
 static std::vector<uint64_t>            g_unresolved_stub_thunk_pages;
 static uint64_t                         g_unresolved_stub_thunk_offset = 0;
 static constexpr uint64_t               UNRESOLVED_STUB_PAGE_SIZE      = 4096;
 
-static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id);
+static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id, uint64_t guest_return);
 
 static bool PatchGuestMemory64(uint64_t vaddr, uint64_t value) {
 	auto* ptr     = reinterpret_cast<uint64_t*>(vaddr);
@@ -138,7 +145,7 @@ static bool PatchGuestMemory64(uint64_t vaddr, uint64_t value) {
 }
 
 static uint64_t AllocateUnresolvedImportThunk(uint64_t record_id) {
-	constexpr uint64_t thunk_size = 34;
+	constexpr uint64_t thunk_size = 39;
 
 	if (g_unresolved_stub_thunk_pages.empty() ||
 	    g_unresolved_stub_thunk_offset + thunk_size > UNRESOLVED_STUB_PAGE_SIZE) {
@@ -156,6 +163,7 @@ static uint64_t AllocateUnresolvedImportThunk(uint64_t record_id) {
 
 	uint8_t bytes[thunk_size] = {
 	    0x48, 0x83, 0xec, 0x08,               // sub rsp, 8
+	    0x48, 0x8b, 0x74, 0x24, 0x08, // mov rsi, [rsp + 8] (guest return address)
 	    0x48, 0xbf, 0, 0, 0, 0, 0, 0, 0, 0, // mov rdi, record_id
 	    0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, UnresolvedImportStub
 	    0xff, 0xd0,                           // call rax
@@ -164,8 +172,8 @@ static uint64_t AllocateUnresolvedImportThunk(uint64_t record_id) {
 	    0xc3,                                 // ret
 	};
 	const auto target = reinterpret_cast<uint64_t>(UnresolvedImportStub);
-	std::memcpy(bytes + 6, &record_id, sizeof(record_id));
-	std::memcpy(bytes + 16, &target, sizeof(target));
+	std::memcpy(bytes + 11, &record_id, sizeof(record_id));
+	std::memcpy(bytes + 21, &target, sizeof(target));
 	std::memcpy(code, bytes, sizeof(bytes));
 	Common::VirtualMemory::FlushInstructionCache(reinterpret_cast<uint64_t>(code), thunk_size);
 	return reinterpret_cast<uint64_t>(code);
@@ -193,10 +201,16 @@ static uint64_t RegisterStubbedImport(uint32_t index, const Program* program,
 	return thunk;
 }
 
-static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id) {
+static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id, uint64_t guest_return) {
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::UnresolvedImportCalls);
+	bool first_call = false;
+	if (record_id < g_unresolved_ledger.size()) {
+		auto& entry = g_unresolved_ledger[record_id];
+		first_call  = entry.calls.fetch_add(1, std::memory_order_relaxed) == 0;
+		if (first_call) entry.first_caller.store(guest_return, std::memory_order_relaxed);
+	}
 	const auto log_index = g_unresolved_stub_call_log_count.fetch_add(1);
-	if (log_index < 1024) {
+	if (log_index < 1024 || first_call) {
 		if (record_id < g_stubbed_imports.size()) {
 			const auto& record = g_stubbed_imports[record_id];
             Common::HleTrace::UnresolvedImport(record.name, record.index);
@@ -1532,6 +1546,76 @@ Program* RuntimeLinker::FindProgramByFileName(const std::filesystem::path& elf_n
 	return nullptr;
 }
 
+#if KYTY_DIAGNOSTIC_RUNTIME
+// PSVXXII J2: top-32 called unresolved imports, printed once before the first crash
+// receipt. Symbol, module base name, call count and first caller module+offset only.
+static void ReportUnresolvedImports() {
+	struct Top {
+		uint64_t calls = 0;
+		size_t   id    = 0;
+	};
+	std::array<Top, 32> top {};
+	size_t used = 0;
+	const size_t count = std::min(g_stubbed_imports.size(), g_unresolved_ledger.size());
+	for (size_t id = 0; id < count; id++) {
+		const uint64_t calls = g_unresolved_ledger[id].calls.load(std::memory_order_relaxed);
+		if (calls == 0) continue;
+		size_t slot = used;
+		if (used == top.size()) {
+			slot = 0;
+			for (size_t i = 1; i < top.size(); i++) {
+				if (top[i].calls < top[slot].calls) slot = i;
+			}
+			if (calls <= top[slot].calls) continue;
+		} else {
+			used++;
+		}
+		top[slot] = {calls, id};
+	}
+	std::sort(top.begin(), top.begin() + static_cast<std::ptrdiff_t>(used), [](const Top& a, const Top& b) { return a.calls > b.calls; });
+	for (size_t i = 0; i < used; i++) {
+		const auto& record = g_stubbed_imports[top[i].id];
+		char symbol[65];
+		char program[49];
+		char caller[49] = "unknown";
+		uint64_t offset = 0;
+		Common::Diagnostics::SanitizeSymbolName(record.name.c_str(), symbol, sizeof(symbol));
+		Common::Diagnostics::SanitizeModuleName(record.program.c_str(), program, sizeof(program));
+		const uint64_t first = g_unresolved_ledger[top[i].id].first_caller.load(std::memory_order_relaxed);
+		if (const auto* p = Common::Singleton<RuntimeLinker>::Instance()->TryFindProgramByAddr(first); p != nullptr) {
+			Common::Diagnostics::SanitizeModuleName(p->file_name.filename().string().c_str(), caller, sizeof(caller));
+			offset = first - p->base_vaddr;
+		}
+		std::fprintf(stderr, "XXII_UNRESOLVED_V1 symbol=%s program=%s calls=%" PRIu64 " caller=%s offset=0x%" PRIx64 "\n",
+		             symbol, program, top[i].calls, caller, offset);
+	}
+	std::fflush(stderr);
+}
+
+uint64_t RegisterUnresolvedImportForTest(const std::string& name, const std::string& program) {
+	StubbedImportRecord record {};
+	record.name    = name;
+	record.program = program;
+	g_stubbed_imports.push_back(record);
+	const auto record_id = g_stubbed_imports.size() - 1;
+	const auto thunk     = AllocateUnresolvedImportThunk(record_id);
+	g_stubbed_imports[record_id].thunk_vaddr = thunk;
+	return thunk;
+}
+
+bool UnresolvedImportLedgerForTest(uint64_t thunk, uint64_t* calls, uint64_t* first_caller) {
+	for (size_t id = 0; id < g_stubbed_imports.size() && id < g_unresolved_ledger.size(); id++) {
+		if (g_stubbed_imports[id].thunk_vaddr != thunk) continue;
+		*calls        = g_unresolved_ledger[id].calls.load();
+		*first_caller = g_unresolved_ledger[id].first_caller.load();
+		return true;
+	}
+	return false;
+}
+
+void ReportUnresolvedImportsForTest() { ReportUnresolvedImports(); }
+#endif
+
 // PSVXXII J1a fatal-path variant: never blocks on the linker mutex and never EXITs.
 const Program* RuntimeLinker::TryFindProgramByAddr(uint64_t vaddr) noexcept {
 	if (!m_mutex.TryLock()) {
@@ -2070,6 +2154,9 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		EXIT("Failed to install the required vectored exception handler\n");
 	}
 	Common::Diagnostics::InstallCrashReceipts();
+#if KYTY_DIAGNOSTIC_RUNTIME
+	Common::Diagnostics::SetCrashContextReporter(ReportUnresolvedImports);
+#endif
 
 	std::vector<std::pair<uint64_t, uint64_t>> executable_segments;
 	uint64_t                                   eh_frame_header_addr = 0;

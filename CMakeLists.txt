@@ -459,6 +459,10 @@ target_include_directories(trophy_system_tests PRIVATE ${inc_headers})
 add_executable(crash_receipt_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CrashReceiptTests.cpp")
 target_link_libraries(crash_receipt_tests common)
 target_include_directories(crash_receipt_tests PRIVATE ${inc_headers})
+if(KYTY_DIAGNOSTIC_RUNTIME)
+	# PSVXXII J2: execute real unresolved-import thunks and check their ledger.
+	add_kyty_full_emulator_test(unresolved_import_ledger_tests "${KYTY_TESTS_DIR}/UnresolvedImportLedgerTests.cpp")
+endif()
 
 add_executable(avplayer_file_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AvPlayerFileTests.cpp"
@@ -747,6 +751,12 @@ if(BUILD_TESTING)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
 	add_test(NAME crash_receipt COMMAND $<TARGET_FILE:crash_receipt_tests>)
+	if(TARGET unresolved_import_ledger_tests)
+		add_test(NAME unresolved_import_ledger COMMAND $<TARGET_FILE:unresolved_import_ledger_tests>)
+		add_test(NAME unresolved_import_ledger_report COMMAND $<TARGET_FILE:unresolved_import_ledger_tests> --report)
+		set_tests_properties(unresolved_import_ledger_report PROPERTIES TIMEOUT 60
+			PASS_REGULAR_EXPRESSION "XXII_UNRESOLVED_V1 symbol=AbCdEfGhIjK#A#B program=eboot.bin calls=3 caller=unknown offset=0x0")
+	endif()
 	if(KYTY_DIAGNOSTIC_RUNTIME)
 		foreach(crash_mode abort terminate)
 			add_test(NAME crash_receipt_${crash_mode} COMMAND $<TARGET_FILE:crash_receipt_tests> --crash=${crash_mode})
@@ -896,6 +906,9 @@ if(BUILD_TESTING)
 		save_data_dialog_tests
 		http_uri_parse_tests
 	)
+if(TARGET unresolved_import_ledger_tests)
+	add_dependencies(kyty_tests unresolved_import_ledger_tests)
+endif()
 endif()
 
 # Test Darwin signal-context restoration for SSE4a instructions.
