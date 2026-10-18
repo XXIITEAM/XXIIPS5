@@ -22,10 +22,12 @@
 
 namespace Common::HleWaitSnapshot {
 constexpr uint32_t Magic = 0x57583232;
-// Bumped: nonce-bound producer handshake and per-slot generation are required.
-constexpr uint32_t Version = 2;
+// V3: nonce/PID-bound, bounded per-equeue event delivery counters.
+constexpr uint32_t Version = 3;
 constexpr uint32_t Capacity = 256;
 constexpr uint32_t TopWaits = 12;
+constexpr uint32_t QueueCapacity = 64;
+constexpr uint32_t TopQueues = 16;
 
 enum class Operation : uint32_t {
     Unknown, WaitEqueue, Semaphore, PthreadSemaphore, Condition, Address32, Address64
@@ -68,9 +70,25 @@ struct alignas(8) Slot {
     volatile LONG operation;
     volatile LONG mode;
     volatile LONG thread;
+    volatile LONG queueSlot; // session-only ordinal, 0 means unattributed
     alignas(8) volatile LONG64 call;
     alignas(8) volatile LONG64 startedMs;
     alignas(8) volatile LONG64 generation; // detect slot reuse during a snapshot
+};
+// The ordinal is local to the current guest process, never a guest queue
+// handle, name, address or kernel event key. Slots are NEVER reused.
+struct alignas(8) QueueCounters {
+    volatile LONG registered;
+    alignas(8) volatile LONG64 addSignals;
+    alignas(8) volatile LONG64 triggerSignals;
+    alignas(8) volatile LONG64 waitCalls;
+    alignas(8) volatile LONG64 waitEventReturns;
+    alignas(8) volatile LONG64 waitEmptyReturns;
+    alignas(8) volatile LONG64 deliveredEvents;
+    alignas(8) volatile LONG64 timerExpirations;
+};
+enum class QueueEvent : uint32_t {
+    AddSignal, TriggerSignal, WaitCall, WaitEvents, WaitEmpty, Delivered, TimerExpired
 };
 struct alignas(8) Table {
     uint32_t magic, version, capacity;
@@ -80,7 +98,9 @@ struct alignas(8) Table {
     volatile LONG guestAuthenticated;
     volatile LONG guestConnected;           // published LAST by guest
     volatile LONG cursor, dropped;
+    volatile LONG queueCursor, queueOverflow;
     Slot records[Capacity];
+    QueueCounters queues[QueueCapacity];
 };
 static_assert(std::is_trivially_copyable_v<Table> && std::is_standard_layout_v<Table>);
 static_assert(sizeof(Table) < 65536);
@@ -129,6 +149,43 @@ inline bool BindGuest(Table* table, uint64_t high, uint64_t low,
     return true;
 }
 struct Ticket { Slot* slot = nullptr; };
+// The producer owns this anonymous ordinal. A full table must return 0,
+// NEVER alias another live queue or wrap a 32-bit index.
+inline uint32_t RegisterQueue(Table* table) noexcept {
+    if (!Valid(table)) return 0;
+    const LONG next = InterlockedIncrement(&table->queueCursor);
+    if (next < 1 || next > static_cast<LONG>(QueueCapacity)) {
+        InterlockedIncrement(&table->queueOverflow);
+        return 0;
+    }
+    InterlockedExchange(&table->queues[next - 1].registered, 1);
+    return static_cast<uint32_t>(next);
+}
+inline void CountQueue(Table* table, uint32_t ordinal, QueueEvent event,
+                       uint32_t amount = 1) noexcept {
+    if (!Valid(table) || ordinal == 0 || ordinal > QueueCapacity ||
+        amount == 0 || amount > 4096) return;
+    auto* q = &table->queues[ordinal - 1];
+    if (InterlockedCompareExchange(&q->registered, 0, 0) != 1) return;
+    volatile LONG64* field = nullptr;
+    switch (event) {
+        case QueueEvent::AddSignal: field = &q->addSignals; break;
+        case QueueEvent::TriggerSignal: field = &q->triggerSignals; break;
+        case QueueEvent::WaitCall: field = &q->waitCalls; break;
+        case QueueEvent::WaitEvents: field = &q->waitEventReturns; break;
+        case QueueEvent::WaitEmpty: field = &q->waitEmptyReturns; break;
+        case QueueEvent::Delivered: field = &q->deliveredEvents; break;
+        case QueueEvent::TimerExpired: field = &q->timerExpirations; break;
+    }
+    if (field) InterlockedExchangeAdd64(field, static_cast<LONG64>(amount));
+}
+inline void AnnotateQueue(Ticket ticket, uint32_t ordinal) noexcept {
+    if (!ticket.slot || ordinal == 0 || ordinal > QueueCapacity) return;
+    if (InterlockedCompareExchange(&ticket.slot->state, 0, 0) != 2) return;
+    if (InterlockedCompareExchange(&ticket.slot->operation, 0, 0) !=
+        static_cast<LONG>(Operation::WaitEqueue)) return;
+    InterlockedExchange(&ticket.slot->queueSlot, static_cast<LONG>(ordinal));
+}
 
 inline Table* OpenNamed(const wchar_t* name) noexcept {
     HANDLE mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
@@ -203,6 +260,7 @@ inline Ticket Enter(Table* table, uint64_t call, Operation op, Mode mode,
         InterlockedExchange(&slot->operation, static_cast<LONG>(op));
         InterlockedExchange(&slot->mode, static_cast<LONG>(mode));
         InterlockedExchange(&slot->thread, static_cast<LONG>(tid));
+        InterlockedExchange(&slot->queueSlot, 0);
         InterlockedExchange64(&slot->call, static_cast<LONG64>(call));
         InterlockedExchange64(&slot->startedMs, static_cast<LONG64>(tickMs));
         // A reused slot can transition active->free->active while a reader
@@ -227,6 +285,7 @@ struct Sample {
     Operation operation = Operation::Unknown;
     Mode mode = Mode::Unknown;
     uint32_t thread = 0;
+    uint32_t queueSlot = 0;
     uint64_t call = 0;
     uint64_t ageMs = 0;
 };
@@ -256,6 +315,7 @@ inline Snapshot Inspect(const Table* table, uint64_t tickMs) noexcept {
         const auto op = static_cast<Operation>(r32(&slot.operation));
         const auto mode = static_cast<Mode>(r32(&slot.mode));
         const auto thread = static_cast<uint32_t>(r32(&slot.thread));
+        const auto queueSlot = static_cast<uint32_t>(r32(&slot.queueSlot));
         const auto started = static_cast<uint64_t>(r64(&slot.startedMs));
         if (r32(&slot.state) != 2 || r64(&slot.generation) != epoch) {
             ++result.unstable;
@@ -263,11 +323,13 @@ inline Snapshot Inspect(const Table* table, uint64_t tickMs) noexcept {
         }
         if (call == 0 || op == Operation::Unknown ||
             (mode != Mode::Infinite && mode != Mode::Timed) ||
+            queueSlot > QueueCapacity ||
+            (queueSlot != 0 && op != Operation::WaitEqueue) ||
             started > tickMs) {
             ++result.invalid;
             continue;
         }
-        const Sample sample {op, mode, thread, call, tickMs - started};
+        const Sample sample {op, mode, thread, queueSlot, call, tickMs - started};
         ++result.outstanding;
         if (result.count == TopWaits &&
             sample.ageMs <= result.oldest[result.count - 1].ageMs) {
@@ -281,6 +343,68 @@ inline Snapshot Inspect(const Table* table, uint64_t tickMs) noexcept {
         for (uint32_t n = result.count - 1; n > pos; --n)
             result.oldest[n] = result.oldest[n - 1];
         result.oldest[pos] = sample;
+    }
+    return result;
+}
+// Read with Interlocked operations only; values can advance between fields.
+// Never interpret two counters as an atomic guest-wide point in time.
+struct QueueSample {
+    uint32_t ordinal = 0;
+    uint64_t addSignals = 0, triggerSignals = 0, waitCalls = 0;
+    uint64_t waitEventReturns = 0, waitEmptyReturns = 0;
+    uint64_t deliveredEvents = 0, timerExpirations = 0;
+};
+struct QueueSnapshot {
+    uint32_t created = 0, overflow = 0, omitted = 0, invalid = 0, count = 0;
+    std::array<QueueSample, TopQueues> busiest {};
+};
+inline QueueSnapshot InspectQueues(const Table* table) noexcept {
+    QueueSnapshot result {};
+    if (!Valid(table)) return result;
+    const auto r32 = [](const volatile LONG* p) -> LONG {
+        return InterlockedCompareExchange(const_cast<volatile LONG*>(p), 0, 0);
+    };
+    const auto r64 = [](const volatile LONG64* p) -> LONG64 {
+        return InterlockedCompareExchange64(const_cast<volatile LONG64*>(p), 0, 0);
+    };
+    const LONG count = r32(&table->queueCursor);
+    const LONG overflow = r32(&table->queueOverflow);
+    if (count < 0 || overflow < 0) { ++result.invalid; return result; }
+    result.created = static_cast<uint32_t>(count);
+    result.overflow = static_cast<uint32_t>(overflow);
+    for (uint32_t i = 0; i < QueueCapacity; ++i) {
+        const auto& source = table->queues[i];
+        if (r32(&source.registered) != 1) continue;
+        const LONG64 fields[] {r64(&source.addSignals), r64(&source.triggerSignals),
+            r64(&source.waitCalls), r64(&source.waitEventReturns),
+            r64(&source.waitEmptyReturns), r64(&source.deliveredEvents),
+            r64(&source.timerExpirations)};
+        bool valid = true;
+        for (const LONG64 v : fields) if (v < 0) valid = false;
+        if (!valid) { ++result.invalid; continue; }
+        const QueueSample row {i + 1,
+            static_cast<uint64_t>(fields[0]), static_cast<uint64_t>(fields[1]),
+            static_cast<uint64_t>(fields[2]), static_cast<uint64_t>(fields[3]),
+            static_cast<uint64_t>(fields[4]), static_cast<uint64_t>(fields[5]),
+            static_cast<uint64_t>(fields[6])};
+        // Prefer active wait queues to high-volume unrelated event producers.
+        // This is an observation priority only, never cause attribution.
+        const auto rank = [](const QueueSample& q) {
+            return q.waitCalls;
+        };
+        if (result.count == TopQueues &&
+            rank(row) <= rank(result.busiest[result.count - 1])) {
+            ++result.omitted;
+            continue;
+        }
+        uint32_t at = 0;
+        while (at < result.count &&
+               rank(result.busiest[at]) >= rank(row)) ++at;
+        if (result.count < TopQueues) ++result.count;
+        else ++result.omitted;
+        for (uint32_t n = result.count - 1; n > at; --n)
+            result.busiest[n] = result.busiest[n - 1];
+        result.busiest[at] = row;
     }
     return result;
 }

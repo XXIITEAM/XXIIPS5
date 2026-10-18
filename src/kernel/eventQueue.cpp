@@ -27,6 +27,12 @@ constexpr uint16_t EV_ONESHOT = 0x10;
 constexpr uint16_t EV_CLEAR   = 0x20;
 constexpr uint16_t EV_ERROR   = 0x4000;
 
+// Diagnostic counters are metadata only: zero cost from the queue mapping
+// unless a Developer capture is explicitly armed. No queue handles or names
+// cross the runtime boundary.
+enum class EqueueDiagnosticEvent : uint32_t {
+    AddSignal, TriggerSignal, WaitCall, WaitEvents, WaitEmpty, Delivered, TimerExpired
+};
 static uint64_t MonotonicTimeNs() {
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
 	                                 std::chrono::steady_clock::now().time_since_epoch())
@@ -39,7 +45,14 @@ static uint64_t                                          g_next_equeue = 1;
 
 class KernelEqueuePrivate {
 public:
-	explicit KernelEqueuePrivate(KernelEqueue handle): m_handle(handle) {}
+	explicit KernelEqueuePrivate(KernelEqueue handle): m_handle(handle) {
+#if defined(_WIN32) && KYTY_DIAGNOSTIC_RUNTIME
+        if (Common::HleTrace::Enabled()) {
+            m_diagTable = Common::HleWaitSnapshot::RuntimeTable();
+            m_diagSlot = Common::HleWaitSnapshot::RegisterQueue(m_diagTable);
+        }
+#endif
+    }
 	virtual ~KernelEqueuePrivate();
 
 	KYTY_CLASS_NO_COPY(KernelEqueuePrivate);
@@ -54,6 +67,22 @@ public:
 	int  GetTriggeredEvents(KernelEvent* ev, int num);
 	int  WaitForEvents(KernelEvent* ev, int num, uint32_t micros);
 	void Close();
+    [[nodiscard]] uint32_t DiagnosticSlot() const noexcept {
+#if defined(_WIN32) && KYTY_DIAGNOSTIC_RUNTIME
+        return m_diagSlot;
+#else
+        return 0;
+#endif
+    }
+    void CountDiagnostic(EqueueDiagnosticEvent event, uint32_t count = 1) noexcept {
+#if defined(_WIN32) && KYTY_DIAGNOSTIC_RUNTIME
+        Common::HleWaitSnapshot::CountQueue(m_diagTable, m_diagSlot,
+            static_cast<Common::HleWaitSnapshot::QueueEvent>(event), count);
+#else
+        (void)event;
+        (void)count;
+#endif
+    }
 
 private:
 	void TriggerExpiredTimers(uint64_t now_ns);
@@ -65,6 +94,10 @@ private:
 	std::string                  m_name;
 	KernelEqueue                 m_handle = KERNEL_EQUEUE_INVALID;
 	bool                         m_closed = false;
+#if defined(_WIN32) && KYTY_DIAGNOSTIC_RUNTIME
+    uint32_t                     m_diagSlot = 0;
+    Common::HleWaitSnapshot::Table* m_diagTable = nullptr;
+#endif
 };
 
 KernelEqueuePrivate::~KernelEqueuePrivate() {
@@ -137,6 +170,8 @@ int KernelEqueuePrivate::GetTriggeredEvents(KernelEvent* ev, int num) {
 		}
 	}
 
+    if (ret > 0) CountDiagnostic(EqueueDiagnosticEvent::Delivered,
+                                 static_cast<uint32_t>(ret));
 	return ret;
 }
 
@@ -149,6 +184,8 @@ void KernelEqueuePrivate::TriggerExpiredTimers(uint64_t now_ns) {
 				event.event.data += static_cast<intptr_t>(count);
 				event.deadline_ns += count * event.interval_ns;
 			}
+            if (!event.triggered)
+                CountDiagnostic(EqueueDiagnosticEvent::TimerExpired);
 			event.triggered = true;
 		}
 	}
@@ -231,6 +268,7 @@ int KernelEqueuePrivate::AddEvent(const KernelEqueueEvent& event) {
 	}
 
 	m_cond_var.Signal();
+    CountDiagnostic(EqueueDiagnosticEvent::AddSignal);
 	return OK;
 }
 
@@ -253,6 +291,7 @@ int KernelEqueuePrivate::TriggerEvent(uintptr_t ident, int16_t filter, void* tri
 		}
 
 		m_cond_var.Signal();
+        CountDiagnostic(EqueueDiagnosticEvent::TriggerSignal);
 
 		return OK;
 	}
@@ -418,6 +457,8 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 
 	EXIT_NOT_IMPLEMENTED(out == nullptr);
 
+    hle.SetQueueSlot(owner->DiagnosticSlot());
+    owner->CountDiagnostic(EqueueDiagnosticEvent::WaitCall);
 	LOGF("\tEqueue wait: %s, caller = 0x%016" PRIx64 ", eq = 0x%016" PRIx64 ", ev = 0x%016" PRIx64
 	     ", num = %d, timo = %s, thread_id = %d\n",
 	     owner->GetName().c_str(), reinterpret_cast<uint64_t>(__builtin_return_address(0)),
@@ -437,6 +478,10 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 		}
 	}
 
+    if (*out >= 0) {
+        owner->CountDiagnostic(*out > 0 ? EqueueDiagnosticEvent::WaitEvents :
+                                            EqueueDiagnosticEvent::WaitEmpty);
+    }
 	if (*out == KERNEL_ERROR_EBADF) {
         hle.Finish(KERNEL_ERROR_EBADF);
 		return KERNEL_ERROR_EBADF;

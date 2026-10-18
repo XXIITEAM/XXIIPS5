@@ -175,6 +175,13 @@ public:
     }
     Span(const Span&) = delete;
     Span& operator=(const Span&) = delete;
+    void SetQueueSlot(uint32_t ordinal) noexcept {
+#if defined(_WIN32)
+        HleWaitSnapshot::AnnotateQueue(m_waitTicket, ordinal);
+#else
+        (void)ordinal;
+#endif
+    }
     void Finish(int64_t code) noexcept {
         m_result = code;
         m_finished = true;
@@ -229,6 +236,7 @@ public:
     Span(const char*, const char*) noexcept {}
     Span(const Span&) = delete;
     Span& operator=(const Span&) = delete;
+    void SetQueueSlot(uint32_t) noexcept {}
     void Finish(int64_t) noexcept {}
 };
 #endif
