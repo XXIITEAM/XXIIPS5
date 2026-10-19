@@ -858,7 +858,14 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 	}();
 	uint64_t diag_start = Common::Timer::QueryPerformanceCounter();
 	uint64_t diag_ticks = 0, diag_presents = 0, diag_lates = 0, diag_peak_busy_us = 0;
+	// Up to twelve minutes of 5-second windows, so slow loading does not
+	// exhaust the witness before the saved game starts.
 	unsigned diag_reports = 0;
+	if (pacing_probe) {
+		std::fprintf(stderr, "XXII_VBLANK_PACING_CONFIG_V1 enabled=1 hz=%u windows=144\n",
+		             Config::GetVblankFrequency());
+		std::fflush(stderr);
+	}
 #endif
 	while (!token.stop_requested()) {
 		const auto sleep_begin = Common::Timer::QueryPerformanceCounter();
@@ -928,7 +935,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::LateVblanks);
 		}
 #if KYTY_DIAGNOSTIC_RUNTIME
-		if (pacing_probe && diag_reports < 24) {
+		if (pacing_probe && diag_reports < 144) {
 			++diag_ticks;
 			if (presented) ++diag_presents;
 			if (total_wait < 0) ++diag_lates;
