@@ -3,6 +3,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -628,6 +629,55 @@ void TestClassicSaveParams() {
 	CHECK(params[0].mtime == nested_mtime);
 }
 
+void SetRootOverride(const fs::path& root) {
+#ifdef _WIN32
+    CHECK(_wputenv_s(L"PSVXXII_SAVE_ROOT", root.wstring().c_str()) == 0);
+#else
+    CHECK(setenv("PSVXXII_SAVE_ROOT", root.string().c_str(), 1) == 0);
+#endif
+}
+void ClearRootOverride() {
+#ifdef _WIN32
+    CHECK(_wputenv_s(L"PSVXXII_SAVE_ROOT", L"") == 0);
+#else
+    CHECK(unsetenv("PSVXXII_SAVE_ROOT") == 0);
+#endif
+}
+void TestPersistentPsvxxiiRoot() {
+    const auto external = fs::absolute("psvxxii-guest-saves");
+    fs::create_directories(external);
+    SetRootOverride(external);
+    Reset("PPSA55555");
+    CHECK(Setup() == 0);
+    uint8_t marker = 0x5a;
+    CHECK(Set(&marker, 1) == OK);
+    const auto memory = external / "PPSA55555" / "sce_sdmemory" / "1" / "memory.dat";
+    CHECK(fs::is_regular_file(memory));
+    CHECK(!fs::exists("_SaveData/PPSA55555"));
+    CHECK(SaveDataTerminate() == OK);
+    CHECK(Setup() == 16 && Get()[0] == marker);
+    Reset("PPSA44444");
+    CHECK(Setup() == 0 && Get()[0] == 0);
+    Reset("PPSA55555");
+    CHECK(Setup() == 16 && Get()[0] == marker);
+    auto named = DirName("autosave");
+    struct SaveDataMount3 mount {};
+    mount.user_id = 1;
+    mount.dir_name = &named;
+    mount.mount_mode = 4;
+    mount.blocks = 48;
+    SaveDataMountResult result {};
+    CHECK(SaveDataMount3(&mount, &result) == OK);
+    CHECK(g_mounted_directory == external / "PPSA55555" / "autosave");
+    std::ofstream(g_mounted_directory / "progress") << "chapter-2";
+    CHECK(SaveDataUmount2(0, &result.mount_point) == OK);
+    CHECK(fs::is_regular_file(external / "PPSA55555" / "autosave" / "progress"));
+    CHECK(SaveDataTerminate() == OK);
+    ClearRootOverride();
+    Reset("PPSA55555");
+    CHECK(Setup() == 0 && Get()[0] == 0);
+}
+
 void RunChild(const fs::path& executable, const char* mode) {
 #ifdef _WIN32
 	CHECK(_spawnl(_P_WAIT, executable.string().c_str(), executable.string().c_str(), mode,
@@ -682,6 +732,8 @@ int main(int argc, char** argv) {
 	TestGuestSaveIsolation();
 	std::fprintf(stderr, "SaveDataMemoryTests: allocations\n");
 	TestSaveAllocations();
+	std::fprintf(stderr, "SaveDataMemoryTests: PSVXXII save vault\n");
+	TestPersistentPsvxxiiRoot();
 	std::fprintf(stderr, "SaveDataMemoryTests: classic save params\n");
 	TestClassicSaveParams();
 	CHECK(SaveDataTerminate() == OK);

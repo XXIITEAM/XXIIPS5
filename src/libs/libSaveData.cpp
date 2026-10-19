@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include <ctime>
 #include <deque>
 #include <map>
@@ -26,7 +27,8 @@ LIB_VERSION("SaveData", 1, "SaveData", 1, 1);
 
 namespace SaveData {
 
-// TODO(): specify dir at launcher
+// Standalone runtime keeps its historical relative _SaveData path.
+// PSVXXII may supply an explicit absolute persistent save vault.
 static constexpr char     SAVE_DATA_DIR[]      = "_SaveData";
 static constexpr uint64_t SAVE_DATA_BLOCKS_MIN = 48;
 static constexpr uint64_t SAVE_DATA_BLOCKS_MAX = 16384;
@@ -291,7 +293,14 @@ static std::string get_title_id() {
 	std::string title_id;
 	if (!Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id) ||
 	    !valid_path_component(title_id)) {
-		title_id = "UNKNOWN";
+		// A homebrew without metadata must not share UNKNOWN save slots with
+		// unrelated software. Only the trusted PSVXXII launch parent sets it.
+		const char* fallback = std::getenv("PSVXXII_SAVE_TITLE_ID");
+		if (fallback != nullptr && valid_path_component(std::string_view(fallback))) {
+			title_id = fallback;
+		} else {
+			title_id = "UNKNOWN";
+		}
 	}
 
 	return title_id;
@@ -301,8 +310,27 @@ static std::string memory_dir_name(uint32_t slot_id) {
 	return "sce_sdmemory" + (slot_id == 0 ? std::string() : std::to_string(slot_id));
 }
 
+static std::filesystem::path save_root_directory() {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+    const wchar_t* configured = _wgetenv(L"PSVXXII_SAVE_ROOT");
+    if (configured == nullptr || configured[0] == L'\0') {
+        return std::filesystem::path(SAVE_DATA_DIR);
+    }
+    const std::filesystem::path root(configured);
+#else
+    const char* configured = std::getenv("PSVXXII_SAVE_ROOT");
+    if (configured == nullptr || configured[0] == '\0') {
+        return std::filesystem::path(SAVE_DATA_DIR);
+    }
+    const std::filesystem::path root(configured);
+#endif
+    // An invalid host override must not silently write into the runtime CWD.
+    EXIT_IF(!root.is_absolute());
+    return root.lexically_normal();
+}
+
 static std::filesystem::path save_user_directory(std::string_view title_id, int32_t user_id) {
-	auto directory = std::filesystem::path(SAVE_DATA_DIR);
+	auto directory = save_root_directory();
 	if (Config::IsGuestUserId(user_id)) {
 		directory /= std::filesystem::path("[users]") / std::to_string(user_id);
 	}
@@ -313,7 +341,7 @@ static std::filesystem::path save_directory(std::string_view title_id, std::stri
                                             int32_t user_id) {
 	for (uint32_t slot = 0; slot < 4; slot++) {
 		if (dir_name == memory_dir_name(slot)) {
-			return std::filesystem::path(SAVE_DATA_DIR) / title_id / dir_name /
+			return save_root_directory() / title_id / dir_name /
 			       std::to_string(user_id);
 		}
 	}
