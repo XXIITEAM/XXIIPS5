@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <list>
 #include <thread>
@@ -847,6 +849,17 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 	EXIT_IF(frequency == 0);
 
 	int64_t total_wait = 0;
+#if KYTY_DIAGNOSTIC_RUNTIME
+	const bool pacing_probe = [] {
+		const char* capture = std::getenv("XXII_COMPAT_PROBE");
+		const char* pacing = std::getenv("XXII_PERF_PACING_PROBE");
+		return capture && capture[0] == '1' && capture[1] == '\0' &&
+		       pacing && pacing[0] == '1' && pacing[1] == '\0';
+	}();
+	uint64_t diag_start = Common::Timer::QueryPerformanceCounter();
+	uint64_t diag_ticks = 0, diag_presents = 0, diag_lates = 0, diag_peak_busy_us = 0;
+	unsigned diag_reports = 0;
+#endif
 	while (!token.stop_requested()) {
 		const auto sleep_begin = Common::Timer::QueryPerformanceCounter();
 		if (total_wait > 0) {
@@ -914,6 +927,26 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		if (total_wait < 0) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::LateVblanks);
 		}
+#if KYTY_DIAGNOSTIC_RUNTIME
+		if (pacing_probe && diag_reports < 24) {
+			++diag_ticks;
+			if (presented) ++diag_presents;
+			if (total_wait < 0) ++diag_lates;
+			const auto busy_us = static_cast<uint64_t>(
+			    (frame_end - frame_begin) * 1000000u / frequency);
+			diag_peak_busy_us = std::max(diag_peak_busy_us, busy_us);
+			if (frame_end >= diag_start && frame_end - diag_start >= frequency * 5u) {
+				std::fprintf(stderr,
+				             "XXII_VBLANK_PACING_V1 hz=%u ticks=%" PRIu64
+				             " presents=%" PRIu64 " late=%" PRIu64 " peak_busy_us=%" PRIu64 "\n",
+				             refresh, diag_ticks, diag_presents, diag_lates, diag_peak_busy_us);
+				std::fflush(stderr);
+				diag_start = frame_end;
+				diag_ticks = diag_presents = diag_lates = diag_peak_busy_us = 0;
+				++diag_reports;
+			}
+		}
+#endif
 	}
 }
 
@@ -1375,6 +1408,21 @@ KYTY_SYSV_ABI int VideoOutSetFlipRate(int handle, int rate) {
 
 	Common::LockGuard lock(ctx->mutex);
 	ctx->flip_rate = rate;
+#if KYTY_DIAGNOSTIC_RUNTIME
+	static const bool diag_probe = [] {
+		const char* capture = std::getenv("XXII_COMPAT_PROBE");
+		return capture && capture[0] == '1' && capture[1] == '\0';
+	}();
+	if (diag_probe) {
+		static std::atomic<unsigned> emitted {0};
+		if (emitted.fetch_add(1, std::memory_order_relaxed) < 16u) {
+			const auto hz = Config::GetVblankFrequency();
+			std::fprintf(stderr, "XXII_FLIP_RATE_V1 rate=%d hz=%u theoretical_cap=%u\n",
+			             rate, hz, hz / static_cast<unsigned>(rate + 1));
+			std::fflush(stderr);
+		}
+	}
+#endif
 
 	return OK;
 }
