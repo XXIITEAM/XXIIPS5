@@ -40,6 +40,53 @@ constexpr int AUDIO_OUT_PORT_TYPE_AUX       = 127;
 constexpr uint32_t AUDIO_OUT_PARAM_FORMAT_MASK = 0x000000ffu;
 constexpr uint64_t AUDIO_OUT_TARGET_LATENCY_US = 40000;
 
+#if KYTY_DIAGNOSTIC_RUNTIME
+// Reuse the existing SDL queue/underrun checks; count their outcomes only
+// in an opted-in Developer capture. No PCM, names, callbacks or mixer changes.
+struct AudioQueueProbe {
+	std::atomic<uint64_t> calls {0};
+	std::atomic<uint64_t> device_batches {0};
+	std::atomic<uint64_t> underruns {0};
+	std::atomic<uint64_t> clears {0};
+	std::atomic<uint64_t> put_errors {0};
+	std::atomic<uint64_t> max_queue_wait_us {0};
+	std::atomic<uint64_t> peak_queued_bytes {0};
+	std::atomic<uint64_t> last_report_us {0};
+	std::atomic<uint32_t> reports {0};
+};
+
+AudioQueueProbe& QueueProbe() {
+	static AudioQueueProbe counters;
+	return counters;
+}
+
+bool HardSilenceEnabled() {
+    static const bool enabled = [] {
+        const char* selected = std::getenv("XXII_DEBUG_HARD_SILENCE");
+        const char* capture = std::getenv("XXII_COMPAT_PROBE");
+        return selected && selected[0] == '1' && selected[1] == '\0' &&
+               capture && capture[0] == '1' && capture[1] == '\0';
+    }();
+    return enabled;
+}
+
+bool QueueProbeEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("XXII_AUDIO_QUEUE_PROBE");
+		return value && value[0] == '1' && value[1] == '\0';
+	}();
+	return enabled;
+}
+
+void PeakAtomic(std::atomic<uint64_t>& peak, uint64_t sample) {
+	auto old = peak.load(std::memory_order_relaxed);
+	while (old < sample && !peak.compare_exchange_weak(
+	        old, sample, std::memory_order_relaxed)) {
+	}
+}
+#endif
+
+
 constexpr int      AUDIO_IN_SILENT_STATE_DEVICE_NONE = 0x1;
 constexpr uint32_t AUDIO_IN_GRAIN_MAX_ASYNC          = 384;
 
@@ -398,6 +445,9 @@ const void* Audio::PrepareOutputBuffer(const PortOut& port, const void* data,
 bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float gain,
                           const float* gains) {
 	EXIT_IF(port == nullptr);
+#if KYTY_DIAGNOSTIC_RUNTIME
+	const bool probe_queue = QueueProbeEnabled();
+#endif
 
 	if (port->stream == nullptr || data == nullptr) {
 		return false;
@@ -421,6 +471,10 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 		auto       queued          = SDL_GetAudioStreamQueued(port->stream);
 		while (queued > static_cast<int>(min_queued_size)) {
 			if (LibKernel::KernelGetProcessTime() - wait_start > 200000) {
+#if KYTY_DIAGNOSTIC_RUNTIME
+				if (probe_queue)
+					QueueProbe().clears.fetch_add(1, std::memory_order_relaxed);
+#endif
 				SDL_ClearAudioStream(port->stream);
 				port->queue_primed = false;
 				break;
@@ -431,12 +485,28 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 		if (queued < static_cast<int>(prepared_size)) {
 			if (port->queue_primed) {
 				Common::DebugCounters::Add(Common::DebugCounters::Counter::AudioUnderruns);
+#if KYTY_DIAGNOSTIC_RUNTIME
+				if (probe_queue)
+					QueueProbe().underruns.fetch_add(1, std::memory_order_relaxed);
+#endif
 			}
 			port->queue_primed = false;
 		}
+#if KYTY_DIAGNOSTIC_RUNTIME
+		if (probe_queue) {
+			const auto waited_us = LibKernel::KernelGetProcessTime() - wait_start;
+			PeakAtomic(QueueProbe().max_queue_wait_us, waited_us);
+			if (queued >= 0)
+				PeakAtomic(QueueProbe().peak_queued_bytes, static_cast<uint64_t>(queued));
+		}
+#endif
 	}
 
 	if (!SDL_PutAudioStreamData(port->stream, prepared_data, static_cast<int>(prepared_size))) {
+#if KYTY_DIAGNOSTIC_RUNTIME
+		if (probe_queue)
+			QueueProbe().put_errors.fetch_add(1, std::memory_order_relaxed);
+#endif
 		LOGF("AudioOut: SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
 		port->queue_primed = false;
 		return false;
@@ -587,6 +657,34 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 	EXIT_NOT_IMPLEMENTED(!AudioOutValid(params[0].handle));
 
 	const auto&                     first_port = m_out_ports[params[0].handle.GetId()];
+#if KYTY_DIAGNOSTIC_RUNTIME
+	// Strictly opt-in Developer playback/haptic sink blockade. No guest PCM
+	// reaches SDL or DualSense here; preserve successful HLE return and the
+	// same sample clock so a silent diagnosis can still advance the game.
+	// Non-Developer builds do not compile the environment switch.
+	if (HardSilenceEnabled()) {
+		static std::atomic<bool> reported {false};
+		if (!reported.exchange(true, std::memory_order_relaxed)) {
+			std::fprintf(stderr,
+			             "XXII_DEBUG_HARD_SILENCE_V1 enabled=1 sdl=blocked dualsense=blocked\n");
+			std::fflush(stderr);
+		}
+		const uint64_t now = LibKernel::KernelGetProcessTime();
+		uint64_t deadline = now;
+		for (uint32_t i = 0; i < num; ++i) {
+			auto& port = m_out_ports[params[i].handle.GetId()];
+			port.queue_primed = false;
+			if (blocking && port.freq != 0)
+				deadline = std::max(deadline, port.clock.Advance(
+				    now, port.samples_num, port.freq));
+			else
+				port.clock = {};
+		}
+		if (blocking && deadline > now)
+			Common::Thread::SleepMicro(deadline - now);
+		return first_port.samples_num;
+	}
+#endif
 	std::array<bool, OUT_PORTS_MAX> paced {};
 	bool                            any_device = false;
 	uint64_t                        deadline   = 0;
@@ -698,6 +796,42 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
             std::fflush(stderr);
         }
     }
+
+#if KYTY_DIAGNOSTIC_RUNTIME
+	// A bounded five-second queue witness. Separate from legacy
+	// XXII_AUDIO_PROGRESS, which is gated to unattended probes only.
+	if (QueueProbeEnabled()) {
+		auto& diag = QueueProbe();
+		const auto calls = diag.calls.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (any_device) diag.device_batches.fetch_add(1, std::memory_order_relaxed);
+		const auto observed_us = LibKernel::KernelGetProcessTime();
+		auto previous = diag.last_report_us.load(std::memory_order_relaxed);
+		if (observed_us >= previous && observed_us - previous >= 5000000 &&
+		    diag.reports.load(std::memory_order_relaxed) < 360u &&
+		    diag.last_report_us.compare_exchange_strong(previous, observed_us,
+		                                                std::memory_order_relaxed) &&
+		    diag.reports.fetch_add(1, std::memory_order_relaxed) < 360u) {
+			std::fprintf(stderr,
+			             "XXII_AUDIO_QUEUE_V1 calls=%" PRIu64
+			             " sdl_batches=%" PRIu64
+			             " underruns=%" PRIu64
+			             " clears=%" PRIu64
+			             " put_errors=%" PRIu64
+			             " max_wait_us=%" PRIu64
+			             " peak_queued_bytes=%" PRIu64
+			             " process_us=%" PRIu64 "\n",
+			             calls,
+			             diag.device_batches.load(std::memory_order_relaxed),
+			             diag.underruns.load(std::memory_order_relaxed),
+			             diag.clears.load(std::memory_order_relaxed),
+			             diag.put_errors.load(std::memory_order_relaxed),
+			             diag.max_queue_wait_us.load(std::memory_order_relaxed),
+			             diag.peak_queued_bytes.load(std::memory_order_relaxed),
+			             observed_us);
+			std::fflush(stderr);
+		}
+	}
+#endif
 
 	return first_port.samples_num;
 }
